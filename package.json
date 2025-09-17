@@ -1,7 +1,10 @@
 {
   "name": "@spacek33z/mouse-hook",
-  "version": "0.1.0",
-  "type": "module",
+  "license": "MIT",
+  "version": "0.1.1",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "node-addon-api": "^8"
   },

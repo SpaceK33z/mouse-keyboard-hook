@@ -1,13 +1,9 @@
-import { EventEmitter } from 'node:events';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
+const { EventEmitter } = require('node:events');
+const { join } = require('node:path');
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const require = createRequire(import.meta.url);
 const addon = require(join(__dirname, 'build/Release/mouse_hook.node'));
 
-export class MouseHook extends EventEmitter {
+class MouseHook extends EventEmitter {
   #hook;
   constructor() {
     super();
@@ -16,3 +12,5 @@ export class MouseHook extends EventEmitter {
   start() { this.#hook.start(); }
   stop() { this.#hook.stop(); }
 }
+
+module.exports = { MouseHook };
