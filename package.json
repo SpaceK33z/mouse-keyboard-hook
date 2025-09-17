@@ -1,0 +1,14 @@
+{
+  "name": "@spacek33z/mouse-hook",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "node-addon-api": "^8"
+  },
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "install": "node-gyp rebuild"
+  },
+  "main": "./index.js",
+  "os": ["darwin"]
+}
