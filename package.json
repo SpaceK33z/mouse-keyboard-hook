@@ -1,29 +1,34 @@
 {
   "name": "@spacek33z/mouse-hook",
   "license": "MIT",
-  "version": "0.1.2",
+  "version": "0.1.7",
   "publishConfig": {
     "access": "public"
   },
+  "type": "module",
   "dependencies": {
     "node-addon-api": "^8"
   },
   "devDependencies": {
     "@types/node": "^24.5.1",
+    "rimraf": "^6.0.1",
     "typescript": "^5.9.2"
   },
   "scripts": {
-    "prebuild": "tsc",
+    "prebuild": "rimraf dist build && tsc",
     "build": "node-gyp rebuild",
-    "install": "node-gyp rebuild"
+    "install": "node-gyp rebuild",
+    "prepare": "pnpm run build"
   },
-  "main": "./build/index.js",
-  "types": "./build/index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "src",
     "binding.gyp"
   ],
   "os": [
-    "darwin"
+    "darwin",
+    "win32"
   ]
 }

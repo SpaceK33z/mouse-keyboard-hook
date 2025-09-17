@@ -1,4 +1,4 @@
-const { MouseHook } = require("./dist/index.js");
+import { MouseHook } from "./dist/index.js";
 
 const mouseHook = new MouseHook();
 mouseHook.start();
