@@ -11,18 +11,22 @@ static Napi::ThreadSafeFunction tsfn;
 
 static const char* TypeToName(CGEventType t) {
   switch (t) {
-    case kCGEventLeftMouseDown: return "leftdown";
-    case kCGEventLeftMouseUp: return "leftup";
-    case kCGEventRightMouseDown: return "rightdown";
-    case kCGEventRightMouseUp: return "rightup";
-    case kCGEventOtherMouseDown: return "otherdown";
-    case kCGEventOtherMouseUp: return "otherup";
-    case kCGEventMouseMoved: return "move";
-    case kCGEventLeftMouseDragged: return "leftdrag";
-    case kCGEventRightMouseDragged: return "rightdrag";
-    case kCGEventOtherMouseDragged: return "otherdrag";
-    case kCGEventScrollWheel: return "scroll";
-    default: return "unknown";
+    case kCGEventKeyDown:
+      return "keypress";
+    case kCGEventLeftMouseDown:
+    case kCGEventRightMouseDown:
+    case kCGEventOtherMouseDown:
+      return "mousedown";
+    case kCGEventLeftMouseUp:
+    case kCGEventRightMouseUp:
+    case kCGEventOtherMouseUp:
+      return "mouseup";
+    case kCGEventLeftMouseDragged:
+    case kCGEventRightMouseDragged:
+    case kCGEventOtherMouseDragged:
+      return "mousedrag";
+    default:
+      return "unknown";
   }
 }
 
@@ -30,22 +34,51 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
   if (!running.load()) return event;
 
   CGPoint p = CGEventGetLocation(event);
-  double deltaX = 0, deltaY = 0;
   int64_t btn = (int64_t)CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
+  CGEventFlags flags = CGEventGetFlags(event);
+  bool metaKey = (flags & kCGEventFlagMaskCommand) != 0;
+  bool altKey = (flags & kCGEventFlagMaskAlternate) != 0;
+  bool shiftKey = (flags & kCGEventFlagMaskShift) != 0;
+  bool ctrlKey = (flags & kCGEventFlagMaskControl) != 0;
 
-  if (type == kCGEventScrollWheel) {
-    deltaY = CGEventGetDoubleValueField(event, kCGScrollWheelEventDeltaAxis1);
-    deltaX = CGEventGetDoubleValueField(event, kCGScrollWheelEventDeltaAxis2);
+  // Extract key character for keypress (key down) events using the current keyboard layout
+  int32_t keychar = 0;
+  std::string key = "";
+  if (type == kCGEventKeyDown) {
+    UniChar buffer[4] = {0};
+    UniCharCount length = 0;
+    CGEventKeyboardGetUnicodeString(event, 4, &length, buffer);
+    if (length > 0) {
+      keychar = (int32_t)buffer[0];
+      // Convert Unicode character to UTF-8 string
+      CFStringRef cfString = CFStringCreateWithCharacters(kCFAllocatorDefault, buffer, length);
+      if (cfString) {
+        CFIndex maxSize = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8);
+        char* utf8Buffer = new char[maxSize + 1];
+        if (CFStringGetCString(cfString, utf8Buffer, maxSize + 1, kCFStringEncodingUTF8)) {
+          key = std::string(utf8Buffer);
+        }
+        delete[] utf8Buffer;
+        CFRelease(cfString);
+      }
+    }
   }
 
   tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", TypeToName(type));
-    obj.Set("x", p.x);
-    obj.Set("y", p.y);
-    obj.Set("button", btn);
-    obj.Set("deltaX", deltaX);
-    obj.Set("deltaY", deltaY);
+    if (type == kCGEventKeyDown) {
+      obj.Set("keychar", keychar);
+      obj.Set("key", key);
+    } else {
+      obj.Set("x", p.x);
+      obj.Set("y", p.y);
+      obj.Set("button", btn);
+    }
+    obj.Set("metaKey", metaKey);
+    obj.Set("altKey", altKey);
+    obj.Set("shiftKey", shiftKey);
+    obj.Set("ctrlKey", ctrlKey);
     cb.Call({ obj });
   });
 
@@ -77,17 +110,16 @@ public:
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
       CGEventMask mask =
+        CGEventMaskBit(kCGEventKeyDown)          |
         CGEventMaskBit(kCGEventLeftMouseDown)   |
         CGEventMaskBit(kCGEventLeftMouseUp)     |
         CGEventMaskBit(kCGEventRightMouseDown)  |
         CGEventMaskBit(kCGEventRightMouseUp)    |
         CGEventMaskBit(kCGEventOtherMouseDown)  |
         CGEventMaskBit(kCGEventOtherMouseUp)    |
-        CGEventMaskBit(kCGEventMouseMoved)      |
         CGEventMaskBit(kCGEventLeftMouseDragged)|
         CGEventMaskBit(kCGEventRightMouseDragged)|
-        CGEventMaskBit(kCGEventOtherMouseDragged)|
-        CGEventMaskBit(kCGEventScrollWheel);
+        CGEventMaskBit(kCGEventOtherMouseDragged);
 
       tap = CGEventTapCreate(kCGSessionEventTap,
                              kCGHeadInsertEventTap,

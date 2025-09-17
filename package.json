@@ -8,10 +8,18 @@
   "dependencies": {
     "node-addon-api": "^8"
   },
+  "devDependencies": {
+    "@types/node": "^24.5.1",
+    "typescript": "^5.9.2"
+  },
   "scripts": {
+    "prebuild": "tsc",
     "build": "node-gyp rebuild",
     "install": "node-gyp rebuild"
   },
-  "main": "./index.js",
-  "os": ["darwin"]
+  "main": "./build/index.js",
+  "types": "./build/index.d.ts",
+  "os": [
+    "darwin"
+  ]
 }
