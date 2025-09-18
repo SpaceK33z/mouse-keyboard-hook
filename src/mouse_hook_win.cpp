@@ -6,6 +6,7 @@
 #include <napi.h>
 #include <psapi.h>
 #include <algorithm>
+#include <UIAutomation.h>
 
 static std::atomic<bool> g_running{false};
 static Napi::ThreadSafeFunction g_tsfn;
@@ -13,6 +14,12 @@ static HHOOK g_mouseHook = nullptr;
 static HHOOK g_keyboardHook = nullptr;
 static std::thread g_loopThread;
 static DWORD g_loopThreadId = 0;
+static IUIAutomation* g_uia = nullptr; // Initialized on hook thread
+
+// Simple cache to avoid querying UIA too often
+static HWND g_lastUrlHwnd = nullptr;
+static std::string g_lastUrl = "";
+static DWORD g_lastUrlTick = 0;
 
 // Helper function to get filename from path
 std::string getFileName(const std::string &value) {
@@ -35,6 +42,102 @@ std::string toUtf8(const std::wstring &str) {
     WideCharToMultiByte(CP_UTF8, 0, str.c_str(), str.length(), &ret[0], len, NULL, NULL);
   }
   return ret;
+}
+
+// Basic URL heuristic
+static bool LooksLikeUrl(const std::string& value) {
+  if (value.empty()) return false;
+  if (value.find(" ") != std::string::npos) return false;
+  std::string lower = value;
+  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+  if (lower.rfind("http://", 0) == 0 ||
+      lower.rfind("https://", 0) == 0 ||
+      lower.rfind("file://", 0) == 0 ||
+      lower.rfind("about:", 0) == 0 ||
+      lower.rfind("edge://", 0) == 0 ||
+      lower.rfind("chrome://", 0) == 0) {
+    return true;
+  }
+  // Fallback: has a dot and at least one alpha
+  bool hasDot = lower.find('.') != std::string::npos;
+  bool hasAlpha = std::any_of(lower.begin(), lower.end(), [](unsigned char c){ return std::isalpha(c) != 0;});
+  return hasDot && hasAlpha;
+}
+
+// Use Windows UI Automation to attempt to read the address bar value for a browser window
+static std::string GetUrlFromHwnd(HWND hwnd) {
+  if (!hwnd || !g_uia) return "";
+
+  DWORD now = GetTickCount();
+  if (g_lastUrlHwnd == hwnd && (now - g_lastUrlTick) < 500) {
+    return g_lastUrl;
+  }
+
+  std::string foundUrl = "";
+  IUIAutomationElement* root = nullptr;
+  if (FAILED(g_uia->ElementFromHandle(hwnd, &root)) || !root) {
+    return "";
+  }
+
+  // Build a condition: ControlType == Edit AND IsPassword == false
+  VARIANT vEdit; VariantInit(&vEdit); vEdit.vt = VT_I4; vEdit.lVal = UIA_EditControlTypeId;
+  IUIAutomationCondition* isEdit = nullptr;
+  g_uia->CreatePropertyCondition(UIA_ControlTypePropertyId, vEdit, &isEdit);
+
+  VARIANT vPwd; VariantInit(&vPwd); vPwd.vt = VT_BOOL; vPwd.boolVal = VARIANT_FALSE;
+  IUIAutomationCondition* notPassword = nullptr;
+  g_uia->CreatePropertyCondition(UIA_IsPasswordPropertyId, vPwd, &notPassword);
+
+  IUIAutomationCondition* editAndNotPwd = nullptr;
+  if (isEdit && notPassword) {
+    g_uia->CreateAndCondition(isEdit, notPassword, &editAndNotPwd);
+  }
+
+  // Search the entire subtree for candidate edits
+  IUIAutomationElementArray* edits = nullptr;
+  if (editAndNotPwd) {
+    g_uia->FindAll(TreeScope_Subtree, editAndNotPwd, &edits);
+  }
+
+  if (edits) {
+    int length = 0;
+    edits->get_Length(&length);
+    for (int i = 0; i < length; i++) {
+      IUIAutomationElement* el = nullptr;
+      if (SUCCEEDED(edits->GetElement(i, &el)) && el) {
+        IUIAutomationValuePattern* vp = nullptr;
+        if (SUCCEEDED(el->GetCurrentPatternAs(UIA_ValuePatternId, __uuidof(IUIAutomationValuePattern), (void**)&vp)) && vp) {
+          BSTR bstr;
+          if (SUCCEEDED(vp->get_CurrentValue(&bstr)) && bstr) {
+            std::wstring wval(bstr, SysStringLen(bstr));
+            SysFreeString(bstr);
+            std::string sval = toUtf8(wval);
+            if (LooksLikeUrl(sval)) {
+              foundUrl = sval;
+              vp->Release();
+              el->Release();
+              break;
+            }
+          }
+          vp->Release();
+        }
+        el->Release();
+      }
+    }
+    edits->Release();
+  }
+
+  if (isEdit) isEdit->Release();
+  if (notPassword) notPassword->Release();
+  if (editAndNotPwd) editAndNotPwd->Release();
+  if (root) root->Release();
+
+  // Update cache
+  g_lastUrlHwnd = hwnd;
+  g_lastUrl = foundUrl;
+  g_lastUrlTick = GetTickCount();
+
+  return foundUrl;
 }
 
 // Return description from file version info
@@ -188,8 +291,11 @@ static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(
     }
   }
 
-  // Extract URL from title if it's a browser
-  std::string windowUrl = extractUrlFromTitle(titleStr, appName);
+  // Prefer UI Automation to read URL from the address bar; fall back to title parsing
+  std::string windowUrl = GetUrlFromHwnd(hwnd);
+  if (windowUrl.empty()) {
+    windowUrl = extractUrlFromTitle(titleStr, appName);
+  }
 
   return {titleStr, appName, windowUrl};
 }
@@ -224,8 +330,11 @@ static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
     }
   }
 
-  // Extract URL from title if it's a browser
-  std::string windowUrl = extractUrlFromTitle(titleStr, appName);
+  // Prefer UI Automation to read URL from the address bar; fall back to title parsing
+  std::string windowUrl = GetUrlFromHwnd(hwnd);
+  if (windowUrl.empty()) {
+    windowUrl = extractUrlFromTitle(titleStr, appName);
+  }
 
   return {titleStr, appName, windowUrl};
 }
@@ -402,12 +511,19 @@ public:
     if (g_running.exchange(true)) return info.Env().Undefined();
 
     g_loopThread = std::thread([](){
+      // Initialize COM and UI Automation on this thread
+      HRESULT hrCo = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+      if (SUCCEEDED(hrCo)) {
+        CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_uia));
+      }
       // Install low-level hooks on this thread and pump messages
       g_loopThreadId = GetCurrentThreadId();
       g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandleW(NULL), 0);
       g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandleW(NULL), 0);
       if (!g_mouseHook || !g_keyboardHook) {
         g_running.store(false);
+        if (g_uia) { g_uia->Release(); g_uia = nullptr; }
+        if (SUCCEEDED(hrCo)) CoUninitialize();
         return;
       }
 
@@ -416,6 +532,9 @@ public:
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
       }
+      // Cleanup UI Automation and COM
+      if (g_uia) { g_uia->Release(); g_uia = nullptr; }
+      if (SUCCEEDED(hrCo)) CoUninitialize();
     });
 
     return info.Env().Undefined();
