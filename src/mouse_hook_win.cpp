@@ -5,7 +5,6 @@
 #include <string>
 #include <napi.h>
 #include <psapi.h>
-#include <version.h>
 #include <algorithm>
 
 static std::atomic<bool> g_running{false};
