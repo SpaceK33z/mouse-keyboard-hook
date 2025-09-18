@@ -289,6 +289,14 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     obj.Set("windowAppName", windowAppName);
     obj.Set("dpiX", static_cast<double>(dpiX));
     obj.Set("dpiY", static_cast<double>(dpiY));
+
+    // Add system DPI for comparison
+    HDC hdc = GetDC(NULL);
+    int systemDpiX = hdc ? GetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    int systemDpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) ReleaseDC(NULL, hdc);
+    obj.Set("systemDpiX", static_cast<double>(systemDpiX));
+    obj.Set("systemDpiY", static_cast<double>(systemDpiY));
     cb.Call({ obj });
   });
 
@@ -384,6 +392,14 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     obj.Set("dpiX", static_cast<double>(dpiX));
     obj.Set("dpiY", static_cast<double>(dpiY));
     obj.Set("usedPhysicalCursor", usedPhysicalCursor);
+
+    // Add system DPI for comparison
+    HDC hdc = GetDC(NULL);
+    int systemDpiX = hdc ? GetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    int systemDpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) ReleaseDC(NULL, hdc);
+    obj.Set("systemDpiX", static_cast<double>(systemDpiX));
+    obj.Set("systemDpiY", static_cast<double>(systemDpiY));
     cb.Call({ obj });
   });
 
