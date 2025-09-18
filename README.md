@@ -16,6 +16,7 @@ Features;
   * `key`, e.g. "A"
   * alt / shift / meta key pressed during the event
   * window title of the active window
+  * x,y coordinates (for cursor position)
 
 ### Install
 

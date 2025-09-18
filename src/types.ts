@@ -11,10 +11,6 @@ export type MouseEvent = {
   windowTitle: string;
   windowAppName: string;
   windowUrl?: string; // only set for macOS
-  dpiX?: number; // only set for Windows debugging
-  dpiY?: number; // only set for Windows debugging
-  systemDpiX?: number; // only set for Windows debugging
-  systemDpiY?: number; // only set for Windows debugging
 };
 
 export type KeypressEvent = {
@@ -30,11 +26,6 @@ export type KeypressEvent = {
   windowTitle: string;
   windowAppName: string;
   windowUrl?: string; // only set for macOS
-  dpiX?: number; // only set for Windows debugging
-  dpiY?: number; // only set for Windows debugging
-  systemDpiX?: number; // only set for Windows debugging
-  systemDpiY?: number; // only set for Windows debugging
-  usedPhysicalCursor?: boolean; // only set for Windows debugging
 };
 
 export type MouseHookEventMap = {
