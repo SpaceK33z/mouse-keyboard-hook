@@ -320,6 +320,9 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     }
   }
 
+  // Determine click count from event (macOS provides this)
+  int64_t clicks = (int64_t)CGEventGetIntegerValueField(event, kCGMouseEventClickState);
+
   tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", TypeToName(type));
@@ -330,6 +333,7 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
       obj.Set("x", p.x);
       obj.Set("y", p.y);
       obj.Set("button", btn);
+      obj.Set("clicks", clicks);
     }
     obj.Set("metaKey", metaKey);
     obj.Set("altKey", altKey);

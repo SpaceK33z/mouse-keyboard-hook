@@ -6,7 +6,6 @@
 #include <napi.h>
 #include <psapi.h>
 #include <algorithm>
-#include <UIAutomation.h>
 
 static std::atomic<bool> g_running{false};
 static Napi::ThreadSafeFunction g_tsfn;
@@ -14,12 +13,12 @@ static HHOOK g_mouseHook = nullptr;
 static HHOOK g_keyboardHook = nullptr;
 static std::thread g_loopThread;
 static DWORD g_loopThreadId = 0;
-static IUIAutomation* g_uia = nullptr; // Initialized on hook thread
 
-// Simple cache to avoid querying UIA too often
-static HWND g_lastUrlHwnd = nullptr;
-static std::string g_lastUrl = "";
-static DWORD g_lastUrlTick = 0;
+// Click tracking state
+static DWORD g_lastClickTime = 0;
+static POINT g_lastClickPoint = {0, 0};
+static int g_clickCount = 0;
+static int g_lastClickButton = -1;
 
 // Helper function to get filename from path
 std::string getFileName(const std::string &value) {
@@ -44,101 +43,6 @@ std::string toUtf8(const std::wstring &str) {
   return ret;
 }
 
-// Basic URL heuristic
-static bool LooksLikeUrl(const std::string& value) {
-  if (value.empty()) return false;
-  if (value.find(" ") != std::string::npos) return false;
-  std::string lower = value;
-  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-  if (lower.rfind("http://", 0) == 0 ||
-      lower.rfind("https://", 0) == 0 ||
-      lower.rfind("file://", 0) == 0 ||
-      lower.rfind("about:", 0) == 0 ||
-      lower.rfind("edge://", 0) == 0 ||
-      lower.rfind("chrome://", 0) == 0) {
-    return true;
-  }
-  // Fallback: has a dot and at least one alpha
-  bool hasDot = lower.find('.') != std::string::npos;
-  bool hasAlpha = std::any_of(lower.begin(), lower.end(), [](unsigned char c){ return std::isalpha(c) != 0;});
-  return hasDot && hasAlpha;
-}
-
-// Use Windows UI Automation to attempt to read the address bar value for a browser window
-static std::string GetUrlFromHwnd(HWND hwnd) {
-  if (!hwnd || !g_uia) return "";
-
-  DWORD now = GetTickCount();
-  if (g_lastUrlHwnd == hwnd && (now - g_lastUrlTick) < 500) {
-    return g_lastUrl;
-  }
-
-  std::string foundUrl = "";
-  IUIAutomationElement* root = nullptr;
-  if (FAILED(g_uia->ElementFromHandle(hwnd, &root)) || !root) {
-    return "";
-  }
-
-  // Build a condition: ControlType == Edit AND IsPassword == false
-  VARIANT vEdit; VariantInit(&vEdit); vEdit.vt = VT_I4; vEdit.lVal = UIA_EditControlTypeId;
-  IUIAutomationCondition* isEdit = nullptr;
-  g_uia->CreatePropertyCondition(UIA_ControlTypePropertyId, vEdit, &isEdit);
-
-  VARIANT vPwd; VariantInit(&vPwd); vPwd.vt = VT_BOOL; vPwd.boolVal = VARIANT_FALSE;
-  IUIAutomationCondition* notPassword = nullptr;
-  g_uia->CreatePropertyCondition(UIA_IsPasswordPropertyId, vPwd, &notPassword);
-
-  IUIAutomationCondition* editAndNotPwd = nullptr;
-  if (isEdit && notPassword) {
-    g_uia->CreateAndCondition(isEdit, notPassword, &editAndNotPwd);
-  }
-
-  // Search the entire subtree for candidate edits
-  IUIAutomationElementArray* edits = nullptr;
-  if (editAndNotPwd && root) {
-    root->FindAll(TreeScope_Subtree, editAndNotPwd, &edits);
-  }
-
-  if (edits) {
-    int length = 0;
-    edits->get_Length(&length);
-    for (int i = 0; i < length; i++) {
-      IUIAutomationElement* el = nullptr;
-      if (SUCCEEDED(edits->GetElement(i, &el)) && el) {
-        IUIAutomationValuePattern* vp = nullptr;
-        if (SUCCEEDED(el->GetCurrentPatternAs(UIA_ValuePatternId, __uuidof(IUIAutomationValuePattern), (void**)&vp)) && vp) {
-          BSTR bstr;
-          if (SUCCEEDED(vp->get_CurrentValue(&bstr)) && bstr) {
-            std::wstring wval(bstr, SysStringLen(bstr));
-            SysFreeString(bstr);
-            std::string sval = toUtf8(wval);
-            if (LooksLikeUrl(sval)) {
-              foundUrl = sval;
-              vp->Release();
-              el->Release();
-              break;
-            }
-          }
-          vp->Release();
-        }
-        el->Release();
-      }
-    }
-    edits->Release();
-  }
-
-  if (isEdit) isEdit->Release();
-  if (notPassword) notPassword->Release();
-  if (editAndNotPwd) editAndNotPwd->Release();
-  if (root) root->Release();
-
-  // Update cache
-  g_lastUrlHwnd = hwnd;
-  g_lastUrl = foundUrl;
-  g_lastUrlTick = GetTickCount();
-
-  return foundUrl;
-}
 
 // Return description from file version info
 // Copied from get-windows: https://github.com/sindresorhus/get-windows/blob/cafa0f661c425f33f6b1f209a53c3b8738f93ffb/Sources/windows/main.cc
@@ -193,78 +97,11 @@ std::string getProcessName(const HANDLE &hProcess) {
   return name;
 }
 
-// Helper function to extract URL from browser window title
-static std::string extractUrlFromTitle(const std::string& title, const std::string& appName) {
-  // Check if this is a browser application
-  std::string lowerAppName = appName;
-  std::transform(lowerAppName.begin(), lowerAppName.end(), lowerAppName.begin(), ::tolower);
 
-  bool isBrowser = (lowerAppName.find("microsoft edge") != std::string::npos ||
-                   lowerAppName.find("chrome") != std::string::npos ||
-                   lowerAppName.find("firefox") != std::string::npos ||
-                   lowerAppName.find("safari") != std::string::npos ||
-                   lowerAppName.find("opera") != std::string::npos);
-
-  if (!isBrowser) return "";
-
-  // Common patterns for URL extraction from window titles
-  // Edge/Chrome: "Page Title - Microsoft Edge" or "Page Title | Microsoft Edge"
-  // Firefox: "Page Title - Mozilla Firefox"
-  // Safari: "Page Title - Safari"
-
-  // Look for common separators and extract what might be a URL
-  std::string url = "";
-
-  // Check if title contains a URL pattern (http:// or https://)
-  size_t httpPos = title.find("http://");
-  size_t httpsPos = title.find("https://");
-
-  if (httpPos != std::string::npos) {
-    size_t start = httpPos;
-    size_t end = title.find(" ", start);
-    if (end == std::string::npos) end = title.length();
-    url = title.substr(start, end - start);
-  } else if (httpsPos != std::string::npos) {
-    size_t start = httpsPos;
-    size_t end = title.find(" ", start);
-    if (end == std::string::npos) end = title.length();
-    url = title.substr(start, end - start);
-  } else {
-    // Try to extract from common browser title patterns
-    // Look for patterns like " - " or " | " that might separate title from browser name
-    size_t dashPos = title.find(" - ");
-    size_t pipePos = title.find(" | ");
-
-    if (dashPos != std::string::npos && dashPos > 0) {
-      // Extract the part before the separator
-      std::string potentialUrl = title.substr(0, dashPos);
-      // Check if it looks like a URL (contains dots and common URL characters)
-      if (potentialUrl.find(".") != std::string::npos &&
-          (potentialUrl.find("www.") != std::string::npos ||
-           potentialUrl.find(".com") != std::string::npos ||
-           potentialUrl.find(".org") != std::string::npos ||
-           potentialUrl.find(".net") != std::string::npos)) {
-        url = potentialUrl;
-      }
-    } else if (pipePos != std::string::npos && pipePos > 0) {
-      std::string potentialUrl = title.substr(0, pipePos);
-      if (potentialUrl.find(".") != std::string::npos &&
-          (potentialUrl.find("www.") != std::string::npos ||
-           potentialUrl.find(".com") != std::string::npos ||
-           potentialUrl.find(".org") != std::string::npos ||
-           potentialUrl.find(".net") != std::string::npos)) {
-        url = potentialUrl;
-      }
-    }
-  }
-
-  return url;
-}
-
-// Helper function to get window title, app name, and URL from a point
-static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
+// Helper function to get window title and app name from a point
+static std::tuple<std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
   HWND hwnd = WindowFromPoint(pt);
-  if (!hwnd) return {"", "", ""};
+  if (!hwnd) return {"", ""};
 
   // Get the window text
   WCHAR title[256] = {0};
@@ -291,19 +128,13 @@ static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(
     }
   }
 
-  // Prefer UI Automation to read URL from the address bar; fall back to title parsing
-  std::string windowUrl = GetUrlFromHwnd(hwnd);
-  if (windowUrl.empty()) {
-    windowUrl = extractUrlFromTitle(titleStr, appName);
-  }
-
-  return {titleStr, appName, windowUrl};
+  return {titleStr, appName};
 }
 
-// Helper function to get window title, app name, and URL from active window
-static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
+// Helper function to get window title and app name from active window
+static std::tuple<std::string, std::string> GetActiveWindowInfo() {
   HWND hwnd = GetForegroundWindow();
-  if (!hwnd) return {"", "", ""};
+  if (!hwnd) return {"", ""};
 
   // Get the window text
   WCHAR title[256] = {0};
@@ -330,13 +161,7 @@ static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
     }
   }
 
-  // Prefer UI Automation to read URL from the address bar; fall back to title parsing
-  std::string windowUrl = GetUrlFromHwnd(hwnd);
-  if (windowUrl.empty()) {
-    windowUrl = extractUrlFromTitle(titleStr, appName);
-  }
-
-  return {titleStr, appName, windowUrl};
+  return {titleStr, appName};
 }
 
 static const char* MouseTypeToName(WPARAM wParam) {
@@ -393,6 +218,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
 
   const char* type = MouseTypeToName(wParam);
   int button = GetButtonFromParams(wParam);
+  int clicks = 0;
 
   // For WM_MOUSEMOVE, only emit mousedrag when any button is down
   if (wParam == WM_MOUSEMOVE) {
@@ -408,11 +234,37 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     else if (GetKeyState(VK_MBUTTON) & 0x8000) button = 2;
   }
 
-  // Get window title, app name, and URL from the point
+  // Determine click count using system double-click time and a small move threshold
+  if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN) {
+    DWORD now = GetTickCount();
+    UINT dct = GetDoubleClickTime();
+    int dx = std::abs(p.x - g_lastClickPoint.x);
+    int dy = std::abs(p.y - g_lastClickPoint.y);
+    // Accept small movement within SM_CXDOUBLECLK/SM_CYDOUBLECLK region
+    int threshX = GetSystemMetrics(SM_CXDOUBLECLK) / 2;
+    int threshY = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+
+    if (g_lastClickButton == button && (now - g_lastClickTime) <= dct && dx <= threshX && dy <= threshY) {
+      g_clickCount += 1;
+    } else {
+      g_clickCount = 1;
+    }
+
+    g_lastClickTime = now;
+    g_lastClickPoint = p;
+    g_lastClickButton = button;
+    clicks = g_clickCount;
+  } else if (wParam == WM_LBUTTONUP || wParam == WM_RBUTTONUP || wParam == WM_MBUTTONUP) {
+    clicks = g_clickCount;
+  } else {
+    // for drag, don't increment
+    clicks = g_clickCount;
+  }
+
+  // Get window title and app name from the point
   auto windowInfo = GetWindowInfoFromPoint(p);
   std::string windowTitle = std::get<0>(windowInfo);
   std::string windowAppName = std::get<1>(windowInfo);
-  std::string windowUrl = std::get<2>(windowInfo);
 
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
@@ -420,13 +272,13 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     obj.Set("x", static_cast<double>(p.x));
     obj.Set("y", static_cast<double>(p.y));
     obj.Set("button", button);
+    obj.Set("clicks", clicks);
     obj.Set("metaKey", metaKey);
     obj.Set("altKey", altKey);
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
     obj.Set("windowAppName", windowAppName);
-    obj.Set("windowUrl", windowUrl);
     cb.Call({ obj });
   });
 
@@ -463,24 +315,28 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   bool shiftKey = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   bool ctrlKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-  // Get window title, app name, and URL from the active window
+  // Get current mouse position
+  POINT mousePos;
+  GetCursorPos(&mousePos);
+
+  // Get window title and app name from the active window
   auto windowInfo = GetActiveWindowInfo();
   std::string windowTitle = std::get<0>(windowInfo);
   std::string windowAppName = std::get<1>(windowInfo);
-  std::string windowUrl = std::get<2>(windowInfo);
 
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", "keypress");
     obj.Set("keychar", keychar);
     obj.Set("key", key);
+    obj.Set("x", static_cast<double>(mousePos.x));
+    obj.Set("y", static_cast<double>(mousePos.y));
     obj.Set("metaKey", metaKey);
     obj.Set("altKey", altKey);
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
     obj.Set("windowAppName", windowAppName);
-    obj.Set("windowUrl", windowUrl);
     cb.Call({ obj });
   });
 
@@ -511,19 +367,12 @@ public:
     if (g_running.exchange(true)) return info.Env().Undefined();
 
     g_loopThread = std::thread([](){
-      // Initialize COM and UI Automation on this thread
-      HRESULT hrCo = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-      if (SUCCEEDED(hrCo)) {
-        CoCreateInstance(CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_uia));
-      }
       // Install low-level hooks on this thread and pump messages
       g_loopThreadId = GetCurrentThreadId();
       g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandleW(NULL), 0);
       g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandleW(NULL), 0);
       if (!g_mouseHook || !g_keyboardHook) {
         g_running.store(false);
-        if (g_uia) { g_uia->Release(); g_uia = nullptr; }
-        if (SUCCEEDED(hrCo)) CoUninitialize();
         return;
       }
 
@@ -532,9 +381,6 @@ public:
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
       }
-      // Cleanup UI Automation and COM
-      if (g_uia) { g_uia->Release(); g_uia = nullptr; }
-      if (SUCCEEDED(hrCo)) CoUninitialize();
     });
 
     return info.Env().Undefined();
