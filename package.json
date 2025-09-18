@@ -1,7 +1,7 @@
 {
   "name": "@spacek33z/mouse-hook",
   "license": "MIT",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "publishConfig": {
     "access": "public"
   },
@@ -26,9 +26,5 @@
     "dist",
     "src",
     "binding.gyp"
-  ],
-  "os": [
-    "darwin",
-    "win32"
   ]
 }

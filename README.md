@@ -3,20 +3,21 @@
 A Node.js native addon to track mouse and keyboard events on macOS and Windows. Linux not supported!
 
 This was developed as an alternative to the various iohook packages that there are. This package is way simpler and does not have any external dependencies.
+It also has a bonus functionality of logging the window title and window url (latter is macOS only), which is inspired from [get-windows](https://github.com/sindresorhus/get-windows).
 
 Features;
 
-* Track mousedown / mouseup / mousedrag
-  * x,y coordinates
-  * button that was pressed (1 = left, 2 = right, 3 = middle)
-  * alt / shift / meta key pressed during the event
-  * window title where the event occurred
-* Track keypress
-  * `keychar`, e.g. 9 = Tab, 13 = Enter
-  * `key`, e.g. "A"
-  * alt / shift / meta key pressed during the event
-  * window title of the active window
-  * x,y coordinates (for cursor position)
+- Track mousedown / mouseup / mousedrag
+  - x,y coordinates
+  - button that was pressed (1 = left, 2 = right, 3 = middle)
+  - alt / shift / meta key pressed during the event
+  - window title where the event occurred
+- Track keypress
+  - `keychar`, e.g. 9 = Tab, 13 = Enter
+  - `key`, e.g. "A"
+  - alt / shift / meta key pressed during the event
+  - window title of the active window
+  - x,y coordinates (for cursor position)
 
 ### Install
 
@@ -36,29 +37,57 @@ This project compiles a native module during install/build using `node-gyp`. Mak
 - For macOS:
   - **Xcode Command Line Tools** (`xcode-select --install`)
 - For Windows:
- - **Visual Studio Build Tools** (C++ build tools)
+- **Visual Studio Build Tools** (C++ build tools)
 
 ### Usage
 
 ```js
-import MouseHook from '@spacek33z/mouse-hook';
+import MouseHook from "@spacek33z/mouse-hook";
 
 const mouseHook = new MouseHook();
 mouseHook.start();
 
-mouseHook.on('mousedown', (evt) => {
-  console.log('mousedown:', evt);
-  console.log('Window:', evt.windowTitle);
+mouseHook.on("mousedown", (evt) => {
+  console.log("mousedown:", evt);
+  console.log("Window:", evt.windowTitle);
 });
 
-mouseHook.on('keypress', (evt) => {
-  console.log('keypress:', evt);
-  console.log('Window:', evt.windowTitle);
+mouseHook.on("keypress", (evt) => {
+  console.log("keypress:", evt);
+  console.log("Window:", evt.windowTitle);
 });
 
 // At some point later:
 mouseHook.stop();
 ```
+
+### How to use in Electron
+
+It should work out of the box with Electron, at least in development mode.
+I had some issues with the release build, it couldn't find the `.node` file it buildt. I'm using electron-build and this is what I added to its config:
+
+```json
+{
+  "build": {
+    "extraResources": [
+      {
+        "from": "node_modules/@spacek33z/mouse-hook/build/Release/",
+        "to": ".",
+        "filter": ["*.node"]
+      }
+    ]
+  }
+}
+```
+
+Then I pointed the package to this custom location of the `.node` file.
+
+```js
+const nodePath = IS_DEV ? undefined : join(process.resourcesPath, 'mouse_hook.node');
+const mouseHook = new MouseHook(nodePath);
+```
+
+You will need to ask for permissions from the user yourself (for macOS), you'll need the Accessibility and Screen Recording permission.
 
 ### Development
 
