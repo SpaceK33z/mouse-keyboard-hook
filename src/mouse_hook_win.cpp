@@ -1,3 +1,4 @@
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <atlstr.h>
 #include <atomic>
@@ -14,6 +15,28 @@ static HHOOK g_mouseHook = nullptr;
 static HHOOK g_keyboardHook = nullptr;
 static std::thread g_loopThread;
 static DWORD g_loopThreadId = 0;
+
+// Initialize DPI awareness once
+static bool g_dpiInitialized = false;
+static void InitializeDpiAwareness() {
+  if (g_dpiInitialized) return;
+  g_dpiInitialized = true;
+
+  // Try to set per-monitor DPI awareness (Windows 10 1703+)
+  typedef BOOL (WINAPI *SetProcessDpiAwarenessContextProc)(DPI_AWARENESS_CONTEXT);
+  HMODULE user32 = GetModuleHandleW(L"user32.dll");
+  if (user32) {
+    SetProcessDpiAwarenessContextProc setDpiAwarenessContext =
+      (SetProcessDpiAwarenessContextProc)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+    if (setDpiAwarenessContext) {
+      setDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+      return;
+    }
+  }
+
+  // Fallback for Windows 8.1+
+  SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+}
 
 // Click tracking state
 static DWORD g_lastClickTime = 0;
@@ -333,58 +356,25 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   bool shiftKey = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   bool ctrlKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-  // Get current mouse position and convert to match mouse event coordinates
+  // Get current mouse position to match mouse event coordinates
   POINT mousePos;
   bool usedPhysicalCursor = GetPhysicalCursorPos(&mousePos);
   UINT dpiX = 96, dpiY = 96;
-
+  
   if (!usedPhysicalCursor) {
     // Fallback: GetCursorPos gives logical coords, convert to physical
     GetCursorPos(&mousePos);
-    HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
-    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
-      if (dpiX == 0) dpiX = 96;
-      if (dpiY == 0) dpiY = 96;
+  }
+  
+  // Now that we're DPI-aware, GetDpiForMonitor should return correct values
+  HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
+  if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
+    if (dpiX == 0) dpiX = 96;
+    if (dpiY == 0) dpiY = 96;
+    // Convert to match MSLLHOOKSTRUCT coordinates (physical pixels)
+    if (!usedPhysicalCursor) {
       mousePos.x = MulDiv(mousePos.x, dpiX, 96);
       mousePos.y = MulDiv(mousePos.y, dpiY, 96);
-    }
-  } else {
-    // GetPhysicalCursorPos gives us coordinates that don't match MSLLHOOKSTRUCT
-    // Since DPI APIs return 96 (app is DPI-unaware), we need to get real scaling factor
-    // Try to get the real DPI by making the thread DPI-aware temporarily
-    HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
-
-    // Try to get real DPI using GetDpiForWindow of desktop
-    HWND desktop = GetDesktopWindow();
-    UINT realDpi = 96;
-
-    // Windows 10 1607+ method
-    typedef UINT (WINAPI *GetDpiForWindowProc)(HWND);
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (user32) {
-      GetDpiForWindowProc getDpiForWindow = (GetDpiForWindowProc)GetProcAddress(user32, "GetDpiForWindow");
-      if (getDpiForWindow) {
-        realDpi = getDpiForWindow(desktop);
-        dpiX = dpiY = realDpi;
-      }
-    }
-
-    // If that failed, calculate from screen metrics
-    if (realDpi == 96) {
-      int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-      int physicalWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-      if (physicalWidth > 0 && screenWidth > 0) {
-        // This is a rough approximation
-        float scale = (float)physicalWidth / screenWidth;
-        realDpi = (UINT)(96.0f * scale);
-        dpiX = dpiY = realDpi;
-      }
-    }
-
-    // Apply scaling to match mouse hook coordinates
-    if (realDpi != 96) {
-      mousePos.x = MulDiv(mousePos.x, realDpi, 96);
-      mousePos.y = MulDiv(mousePos.y, realDpi, 96);
     }
   }
 
@@ -445,6 +435,9 @@ public:
 
   Napi::Value Start(const Napi::CallbackInfo& info) {
     if (g_running.exchange(true)) return info.Env().Undefined();
+
+    // Initialize DPI awareness before starting hooks
+    InitializeDpiAwareness();
 
     g_loopThread = std::thread([](){
       // Install low-level hooks on this thread and pump messages
