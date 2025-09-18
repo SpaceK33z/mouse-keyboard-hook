@@ -9,6 +9,7 @@ export type MouseEvent = {
   ctrlKey: boolean;
   windowTitle: string;
   windowAppName: string;
+  windowUrl: string;
 };
 
 export type KeypressEvent = {
@@ -21,6 +22,7 @@ export type KeypressEvent = {
   ctrlKey: boolean;
   windowTitle: string;
   windowAppName: string;
+  windowUrl: string;
 };
 
 export type MouseHookEventMap = {

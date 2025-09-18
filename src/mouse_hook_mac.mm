@@ -4,21 +4,94 @@
 #include <thread>
 #include <napi.h>
 #include <Cocoa/Cocoa.h>
+#include <Carbon/Carbon.h>
 
 static CFMachPortRef tap = nullptr;
 static CFRunLoopSourceRef runLoopSource = nullptr;
 static std::atomic<bool> running{false};
 static Napi::ThreadSafeFunction tsfn;
 
-// Helper function to get window title and app name from a point
-static std::pair<std::string, std::string> GetWindowInfoFromPoint(CGPoint point) {
+// Helper function to convert CFString to std::string
+static std::string CFStringToStdString(CFStringRef cfString) {
+  if (!cfString) return "";
+
+  CFIndex maxSize = CFStringGetMaximumSizeForEncoding(CFStringGetLength(cfString), kCFStringEncodingUTF8);
+  char* utf8Buffer = new char[maxSize + 1];
+  std::string result = "";
+
+  if (CFStringGetCString(cfString, utf8Buffer, maxSize + 1, kCFStringEncodingUTF8)) {
+    result = std::string(utf8Buffer);
+  }
+
+  delete[] utf8Buffer;
+  return result;
+}
+
+// Helper function to run AppleScript and get browser URL
+static std::string GetBrowserURL(const std::string& bundleId) {
+  // List of supported browsers
+  std::vector<std::string> supportedBrowsers = {
+    "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev", "com.google.Chrome.canary",
+    "com.brave.Browser", "com.brave.Browser.beta", "com.brave.Browser.nightly",
+    "com.microsoft.edgemac", "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Canary",
+    "com.mighty.app", "com.ghostbrowser.gb1", "com.bookry.wavebox", "com.pushplaylabs.sidekick",
+    "com.operasoftware.Opera", "com.operasoftware.OperaNext", "com.operasoftware.OperaDeveloper", "com.operasoftware.OperaGX",
+    "com.vivaldi.Vivaldi", "company.thebrowser.Browser"
+  };
+
+  // Check if it's a supported browser
+  bool isSupported = false;
+  for (const auto& browser : supportedBrowsers) {
+    if (bundleId == browser) {
+      isSupported = true;
+      break;
+    }
+  }
+
+  if (!isSupported) {
+    // Check for Safari
+    if (bundleId == "com.apple.Safari" || bundleId == "com.apple.SafariTechnologyPreview") {
+      isSupported = true;
+    }
+  }
+
+  if (!isSupported) return "";
+
+  // Check accessibility permissions
+  if (!AXIsProcessTrustedWithOptions(nullptr)) {
+    return "";
+  }
+
+  // Build AppleScript command
+  std::string script;
+  if (bundleId == "com.apple.Safari" || bundleId == "com.apple.SafariTechnologyPreview") {
+    script = "tell app id \"" + bundleId + "\" to get URL of front document";
+  } else {
+    script = "tell app id \"" + bundleId + "\" to get the URL of active tab of front window";
+  }
+
+  // Execute AppleScript
+  NSAppleScript* appleScript = [[NSAppleScript alloc] initWithSource:[NSString stringWithUTF8String:script.c_str()]];
+  NSAppleEventDescriptor* result = [appleScript executeAndReturnError:nil];
+
+  if (result) {
+    return std::string([[result stringValue] UTF8String]);
+  }
+
+  return "";
+}
+
+// Helper function to get window information from a point
+static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(CGPoint point) {
+  std::string windowTitle = "";
+  std::string windowAppName = "";
+  std::string windowUrl = "";
+
   // Get all windows and find the one containing the point
   CFArrayRef windowList = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-  if (!windowList) return {"", ""};
+  if (!windowList) return {windowTitle, windowAppName, windowUrl};
 
   CFIndex windowCount = CFArrayGetCount(windowList);
-  std::string title = "";
-  std::string appName = "";
 
   for (CFIndex i = 0; i < windowCount; i++) {
     CFDictionaryRef windowDict = (CFDictionaryRef)CFArrayGetValueAtIndex(windowList, i);
@@ -32,81 +105,164 @@ static std::pair<std::string, std::string> GetWindowInfoFromPoint(CGPoint point)
     }
 
     // Check if point is within this window
-    if (CGRectContainsPoint(windowBounds, point)) {
-      // Get window title
-      CFStringRef titleRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowName);
-      if (titleRef) {
-        // Convert to UTF-8
-        CFIndex maxSize = CFStringGetMaximumSizeForEncoding(CFStringGetLength(titleRef), kCFStringEncodingUTF8);
-        char* utf8Buffer = new char[maxSize + 1];
-
-        if (CFStringGetCString(titleRef, utf8Buffer, maxSize + 1, kCFStringEncodingUTF8)) {
-          title = std::string(utf8Buffer);
-        }
-
-        delete[] utf8Buffer;
-      }
-
-      // Get app name
-      CFStringRef ownerNameRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName);
-      if (ownerNameRef) {
-        // Convert to UTF-8
-        CFIndex maxSize = CFStringGetMaximumSizeForEncoding(CFStringGetLength(ownerNameRef), kCFStringEncodingUTF8);
-        char* utf8Buffer = new char[maxSize + 1];
-
-        if (CFStringGetCString(ownerNameRef, utf8Buffer, maxSize + 1, kCFStringEncodingUTF8)) {
-          appName = std::string(utf8Buffer);
-        }
-
-        delete[] utf8Buffer;
-      }
-
-      // If we're getting "Dock" as the app name, it likely means we don't have proper permissions
-      // Try to get more detailed window info
-      if (appName == "Dock" || appName.empty()) {
-        // Try alternative method using window layer
-        CFNumberRef layerRef = (CFNumberRef)CFDictionaryGetValue(windowDict, kCGWindowLayer);
-        if (layerRef) {
-          int layer;
-          if (CFNumberGetValue(layerRef, kCFNumberIntType, &layer)) {
-            // Layer 0 is usually the desktop/dock, higher layers are actual windows
-            if (layer == 0) {
-              // This is likely the dock or desktop, try to find a better window
-              continue;
-            }
-          }
-        }
-      }
-
-      break;
+    if (!CGRectContainsPoint(windowBounds, point)) {
+      continue;
     }
+
+    // Skip transparent windows
+    CFNumberRef alphaRef = (CFNumberRef)CFDictionaryGetValue(windowDict, kCGWindowAlpha);
+    if (alphaRef) {
+      double alpha;
+      if (CFNumberGetValue(alphaRef, kCFNumberDoubleType, &alpha) && alpha == 0) {
+        continue;
+      }
+    }
+
+    // Skip tiny windows
+    const double minWinSize = 50;
+    if (windowBounds.size.width < minWinSize || windowBounds.size.height < minWinSize) {
+      continue;
+    }
+
+    // Get window owner PID
+    CFNumberRef ownerPIDRef = (CFNumberRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerPID);
+    if (!ownerPIDRef) continue;
+
+    pid_t ownerPID;
+    if (!CFNumberGetValue(ownerPIDRef, kCFNumberSInt32Type, &ownerPID)) {
+      continue;
+    }
+
+    // Get running application
+    NSRunningApplication* app = [NSRunningApplication runningApplicationWithProcessIdentifier:ownerPID];
+    if (!app) continue;
+
+    // Skip dock
+    if ([[app bundleIdentifier] isEqualToString:@"com.apple.dock"]) {
+      continue;
+    }
+
+    // Get window title
+    CFStringRef titleRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowName);
+    if (titleRef) {
+      windowTitle = CFStringToStdString(titleRef);
+    }
+
+    // Get app name
+    windowAppName = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
+    if (windowAppName.empty() && app.localizedName) {
+      windowAppName = std::string([app.localizedName UTF8String]);
+    }
+
+    // Try to get browser URL
+    if (app.bundleIdentifier) {
+      std::string bundleId = std::string([app.bundleIdentifier UTF8String]);
+      windowUrl = GetBrowserURL(bundleId);
+    }
+
+    CFRelease(windowList);
+    return {windowTitle, windowAppName, windowUrl};
   }
 
   CFRelease(windowList);
-  return {title, appName};
+  return {windowTitle, windowAppName, windowUrl};
 }
 
-// Helper function to get window title and app name from active window
-static std::pair<std::string, std::string> GetActiveWindowInfo() {
-  NSWindow* activeWindow = [[NSApplication sharedApplication] keyWindow];
-  if (!activeWindow) {
-    // If no key window, try the main window
-    activeWindow = [[NSApplication sharedApplication] mainWindow];
-  }
-  if (!activeWindow) return {"", ""};
+// Helper function to get window information from active window
+static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
+  std::string windowTitle = "";
+  std::string windowAppName = "";
+  std::string windowUrl = "";
 
-  // Get the window title
-  NSString* title = [activeWindow title];
-  std::string titleStr = title ? std::string([title UTF8String]) : "";
-
-  // Get the app name
-  NSRunningApplication* app = [[NSWorkspace sharedWorkspace] frontmostApplication];
-  std::string appName = "";
-  if (app && app.localizedName) {
-    appName = std::string([app.localizedName UTF8String]);
+  // Get frontmost application
+  NSRunningApplication* frontmostApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
+  if (!frontmostApp) {
+    return {windowTitle, windowAppName, windowUrl};
   }
 
-  return {titleStr, appName};
+  pid_t frontmostPID = [frontmostApp processIdentifier];
+
+  // Get all windows and find the frontmost app's window
+  CFArrayRef windowList = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+  if (!windowList) {
+    return {windowTitle, windowAppName, windowUrl};
+  }
+
+  CFIndex windowCount = CFArrayGetCount(windowList);
+
+  for (CFIndex i = 0; i < windowCount; i++) {
+    CFDictionaryRef windowDict = (CFDictionaryRef)CFArrayGetValueAtIndex(windowList, i);
+    if (!windowDict) continue;
+
+    // Get window owner PID
+    CFNumberRef ownerPIDRef = (CFNumberRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerPID);
+    if (!ownerPIDRef) continue;
+
+    pid_t ownerPID;
+    if (!CFNumberGetValue(ownerPIDRef, kCFNumberSInt32Type, &ownerPID)) {
+      continue;
+    }
+
+    // Only process windows from the frontmost app
+    if (ownerPID != frontmostPID) {
+      continue;
+    }
+
+    // Get window bounds
+    CGRect windowBounds;
+    CFDictionaryRef boundsDict = (CFDictionaryRef)CFDictionaryGetValue(windowDict, kCGWindowBounds);
+    if (!boundsDict || !CGRectMakeWithDictionaryRepresentation(boundsDict, &windowBounds)) {
+      continue;
+    }
+
+    // Skip transparent windows
+    CFNumberRef alphaRef = (CFNumberRef)CFDictionaryGetValue(windowDict, kCGWindowAlpha);
+    if (alphaRef) {
+      double alpha;
+      if (CFNumberGetValue(alphaRef, kCFNumberDoubleType, &alpha) && alpha == 0) {
+        continue;
+      }
+    }
+
+    // Skip tiny windows
+    const double minWinSize = 50;
+    if (windowBounds.size.width < minWinSize || windowBounds.size.height < minWinSize) {
+      continue;
+    }
+
+    // Get running application
+    NSRunningApplication* app = [NSRunningApplication runningApplicationWithProcessIdentifier:ownerPID];
+    if (!app) continue;
+
+    // Skip dock
+    if ([[app bundleIdentifier] isEqualToString:@"com.apple.dock"]) {
+      continue;
+    }
+
+    // Get window title
+    CFStringRef titleRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowName);
+    if (titleRef) {
+      windowTitle = CFStringToStdString(titleRef);
+    }
+
+    // Get app name
+    windowAppName = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
+    if (windowAppName.empty() && app.localizedName) {
+      windowAppName = std::string([app.localizedName UTF8String]);
+    }
+
+    // Try to get browser URL
+    if (app.bundleIdentifier) {
+      std::string bundleId = std::string([app.bundleIdentifier UTF8String]);
+      windowUrl = GetBrowserURL(bundleId);
+    }
+
+    CFRelease(windowList);
+    return {windowTitle, windowAppName, windowUrl};
+  }
+
+  CFRelease(windowList);
+  return {windowTitle, windowAppName, windowUrl};
 }
 
 static const char* TypeToName(CGEventType t) {
@@ -164,19 +320,6 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     }
   }
 
-  // Get window title and app name based on event type
-  std::string windowTitle;
-  std::string windowAppName;
-  if (type == kCGEventKeyDown) {
-    auto windowInfo = GetActiveWindowInfo();
-    windowTitle = windowInfo.first;
-    windowAppName = windowInfo.second;
-  } else {
-    auto windowInfo = GetWindowInfoFromPoint(p);
-    windowTitle = windowInfo.first;
-    windowAppName = windowInfo.second;
-  }
-
   tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", TypeToName(type));
@@ -192,8 +335,24 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     obj.Set("altKey", altKey);
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
+
+    // Get window information based on event type
+    std::string windowTitle, windowAppName, windowUrl;
+    if (type == kCGEventKeyDown) {
+      auto windowInfo = GetActiveWindowInfo();
+      windowTitle = std::get<0>(windowInfo);
+      windowAppName = std::get<1>(windowInfo);
+      windowUrl = std::get<2>(windowInfo);
+    } else {
+      auto windowInfo = GetWindowInfoFromPoint(p);
+      windowTitle = std::get<0>(windowInfo);
+      windowAppName = std::get<1>(windowInfo);
+      windowUrl = std::get<2>(windowInfo);
+    }
+
     obj.Set("windowTitle", windowTitle);
     obj.Set("windowAppName", windowAppName);
+    obj.Set("windowUrl", windowUrl);
     cb.Call({ obj });
   });
 

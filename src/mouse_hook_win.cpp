@@ -4,6 +4,9 @@
 #include <thread>
 #include <string>
 #include <napi.h>
+#include <psapi.h>
+#include <version.h>
+#include <algorithm>
 
 static std::atomic<bool> g_running{false};
 static Napi::ThreadSafeFunction g_tsfn;
@@ -11,6 +14,82 @@ static HHOOK g_mouseHook = nullptr;
 static HHOOK g_keyboardHook = nullptr;
 static std::thread g_loopThread;
 static DWORD g_loopThreadId = 0;
+
+// Helper function to get filename from path
+std::string getFileName(const std::string &value) {
+  char separator = '\\';
+  size_t index = value.rfind(separator, value.length());
+
+  if (index != std::string::npos) {
+    return (value.substr(index + 1, value.length() - index));
+  }
+
+  return ("");
+}
+
+// Convert wstring to UTF-8 string
+std::string toUtf8(const std::wstring &str) {
+  std::string ret;
+  int len = WideCharToMultiByte(CP_UTF8, 0, str.c_str(), str.length(), NULL, 0, NULL, NULL);
+  if (len > 0) {
+    ret.resize(len);
+    WideCharToMultiByte(CP_UTF8, 0, str.c_str(), str.length(), &ret[0], len, NULL, NULL);
+  }
+  return ret;
+}
+
+// Return description from file version info
+// Copied from get-windows: https://github.com/sindresorhus/get-windows/blob/cafa0f661c425f33f6b1f209a53c3b8738f93ffb/Sources/windows/main.cc
+std::string getDescriptionFromFileVersionInfo(const BYTE *pBlock) {
+  UINT bufLen = 0;
+  struct LANGANDCODEPAGE {
+    WORD wLanguage;
+    WORD wCodePage;
+  } * lpTranslate;
+
+  LANGANDCODEPAGE codePage{0x040904E4};
+  // Get language struct
+  if (VerQueryValueW((LPVOID *)pBlock, (LPCWSTR)L"\\VarFileInfo\\Translation", (LPVOID *)&lpTranslate, &bufLen)) {
+    codePage = lpTranslate[0];
+  }
+
+  wchar_t fileDescriptionKey[256];
+  wsprintfW(fileDescriptionKey, L"\\StringFileInfo\\%04x%04x\\FileDescription", codePage.wLanguage, codePage.wCodePage);
+  wchar_t *fileDescription = NULL;
+  UINT fileDescriptionSize;
+  // Get description file
+  if (VerQueryValueW((LPVOID *)pBlock, fileDescriptionKey, (LPVOID *)&fileDescription, &fileDescriptionSize)) {
+    return toUtf8(fileDescription);
+  }
+
+  return "";
+}
+
+// Get process path and name with better app name
+std::string getProcessName(const HANDLE &hProcess) {
+  DWORD dwSize{MAX_PATH};
+  wchar_t exeName[MAX_PATH]{};
+  QueryFullProcessImageNameW(hProcess, 0, exeName, &dwSize);
+  std::string path = toUtf8(exeName);
+  std::string name = getFileName(path);
+
+  DWORD dwHandle = 0;
+  wchar_t *wspath(exeName);
+  DWORD infoSize = GetFileVersionInfoSizeW(wspath, &dwHandle);
+
+  if (infoSize != 0) {
+    BYTE *pVersionInfo = new BYTE[infoSize];
+    std::unique_ptr<BYTE[]> skey_automatic_cleanup(pVersionInfo);
+    if (GetFileVersionInfoW(wspath, NULL, infoSize, pVersionInfo) != 0) {
+      std::string nname = getDescriptionFromFileVersionInfo(pVersionInfo);
+      if (nname != "") {
+        name = nname;
+      }
+    }
+  }
+
+  return name;
+}
 
 // Helper function to get window title and app name from a point
 static std::pair<std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
@@ -30,34 +109,14 @@ static std::pair<std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
     }
   }
 
-  // Get the app name
+  // Get the app name using the better approach
   std::string appName = "";
   DWORD processId = 0;
   GetWindowThreadProcessId(hwnd, &processId);
   if (processId > 0) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
     if (hProcess) {
-      WCHAR exePath[MAX_PATH] = {0};
-      DWORD pathLen = MAX_PATH;
-      if (QueryFullProcessImageNameW(hProcess, 0, exePath, &pathLen)) {
-        // Extract just the filename from the full path
-        WCHAR* fileName = wcsrchr(exePath, L'\\');
-        if (fileName) {
-          fileName++; // Skip the backslash
-          // Remove .exe extension if present
-          WCHAR* ext = wcsrchr(fileName, L'.');
-          if (ext && _wcsicmp(ext, L".exe") == 0) {
-            *ext = L'\0';
-          }
-
-          // Convert to UTF-8
-          int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, fileName, -1, NULL, 0, NULL, NULL);
-          if (sizeNeeded > 0) {
-            appName.resize(sizeNeeded - 1); // -1 to exclude null terminator
-            WideCharToMultiByte(CP_UTF8, 0, fileName, -1, &appName[0], sizeNeeded, NULL, NULL);
-          }
-        }
-      }
+      appName = getProcessName(hProcess);
       CloseHandle(hProcess);
     }
   }
@@ -83,34 +142,14 @@ static std::pair<std::string, std::string> GetActiveWindowInfo() {
     }
   }
 
-  // Get the app name
+  // Get the app name using the better approach
   std::string appName = "";
   DWORD processId = 0;
   GetWindowThreadProcessId(hwnd, &processId);
   if (processId > 0) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
     if (hProcess) {
-      WCHAR exePath[MAX_PATH] = {0};
-      DWORD pathLen = MAX_PATH;
-      if (QueryFullProcessImageNameW(hProcess, 0, exePath, &pathLen)) {
-        // Extract just the filename from the full path
-        WCHAR* fileName = wcsrchr(exePath, L'\\');
-        if (fileName) {
-          fileName++; // Skip the backslash
-          // Remove .exe extension if present
-          WCHAR* ext = wcsrchr(fileName, L'.');
-          if (ext && _wcsicmp(ext, L".exe") == 0) {
-            *ext = L'\0';
-          }
-
-          // Convert to UTF-8
-          int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, fileName, -1, NULL, 0, NULL, NULL);
-          if (sizeNeeded > 0) {
-            appName.resize(sizeNeeded - 1); // -1 to exclude null terminator
-            WideCharToMultiByte(CP_UTF8, 0, fileName, -1, &appName[0], sizeNeeded, NULL, NULL);
-          }
-        }
-      }
+      appName = getProcessName(hProcess);
       CloseHandle(hProcess);
     }
   }
