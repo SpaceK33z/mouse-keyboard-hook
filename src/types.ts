@@ -7,6 +7,8 @@ export type MouseEvent = {
   altKey: boolean;
   shiftKey: boolean;
   ctrlKey: boolean;
+  windowTitle: string;
+  windowAppName: string;
 };
 
 export type KeypressEvent = {
@@ -17,6 +19,8 @@ export type KeypressEvent = {
   altKey: boolean;
   shiftKey: boolean;
   ctrlKey: boolean;
+  windowTitle: string;
+  windowAppName: string;
 };
 
 export type MouseHookEventMap = {

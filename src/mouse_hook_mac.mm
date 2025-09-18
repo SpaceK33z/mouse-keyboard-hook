@@ -3,11 +3,111 @@
 #include <atomic>
 #include <thread>
 #include <napi.h>
+#include <Cocoa/Cocoa.h>
 
 static CFMachPortRef tap = nullptr;
 static CFRunLoopSourceRef runLoopSource = nullptr;
 static std::atomic<bool> running{false};
 static Napi::ThreadSafeFunction tsfn;
+
+// Helper function to get window title and app name from a point
+static std::pair<std::string, std::string> GetWindowInfoFromPoint(CGPoint point) {
+  // Get all windows and find the one containing the point
+  CFArrayRef windowList = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+  if (!windowList) return {"", ""};
+
+  CFIndex windowCount = CFArrayGetCount(windowList);
+  std::string title = "";
+  std::string appName = "";
+
+  for (CFIndex i = 0; i < windowCount; i++) {
+    CFDictionaryRef windowDict = (CFDictionaryRef)CFArrayGetValueAtIndex(windowList, i);
+    if (!windowDict) continue;
+
+    // Get window bounds
+    CGRect windowBounds;
+    CFDictionaryRef boundsDict = (CFDictionaryRef)CFDictionaryGetValue(windowDict, kCGWindowBounds);
+    if (!boundsDict || !CGRectMakeWithDictionaryRepresentation(boundsDict, &windowBounds)) {
+      continue;
+    }
+
+    // Check if point is within this window
+    if (CGRectContainsPoint(windowBounds, point)) {
+      // Get window title
+      CFStringRef titleRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowName);
+      if (titleRef) {
+        // Convert to UTF-8
+        CFIndex maxSize = CFStringGetMaximumSizeForEncoding(CFStringGetLength(titleRef), kCFStringEncodingUTF8);
+        char* utf8Buffer = new char[maxSize + 1];
+
+        if (CFStringGetCString(titleRef, utf8Buffer, maxSize + 1, kCFStringEncodingUTF8)) {
+          title = std::string(utf8Buffer);
+        }
+
+        delete[] utf8Buffer;
+      }
+
+      // Get app name
+      CFStringRef ownerNameRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName);
+      if (ownerNameRef) {
+        // Convert to UTF-8
+        CFIndex maxSize = CFStringGetMaximumSizeForEncoding(CFStringGetLength(ownerNameRef), kCFStringEncodingUTF8);
+        char* utf8Buffer = new char[maxSize + 1];
+
+        if (CFStringGetCString(ownerNameRef, utf8Buffer, maxSize + 1, kCFStringEncodingUTF8)) {
+          appName = std::string(utf8Buffer);
+        }
+
+        delete[] utf8Buffer;
+      }
+
+      // If we're getting "Dock" as the app name, it likely means we don't have proper permissions
+      // Try to get more detailed window info
+      if (appName == "Dock" || appName.empty()) {
+        // Try alternative method using window layer
+        CFNumberRef layerRef = (CFNumberRef)CFDictionaryGetValue(windowDict, kCGWindowLayer);
+        if (layerRef) {
+          int layer;
+          if (CFNumberGetValue(layerRef, kCFNumberIntType, &layer)) {
+            // Layer 0 is usually the desktop/dock, higher layers are actual windows
+            if (layer == 0) {
+              // This is likely the dock or desktop, try to find a better window
+              continue;
+            }
+          }
+        }
+      }
+
+      break;
+    }
+  }
+
+  CFRelease(windowList);
+  return {title, appName};
+}
+
+// Helper function to get window title and app name from active window
+static std::pair<std::string, std::string> GetActiveWindowInfo() {
+  NSWindow* activeWindow = [[NSApplication sharedApplication] keyWindow];
+  if (!activeWindow) {
+    // If no key window, try the main window
+    activeWindow = [[NSApplication sharedApplication] mainWindow];
+  }
+  if (!activeWindow) return {"", ""};
+
+  // Get the window title
+  NSString* title = [activeWindow title];
+  std::string titleStr = title ? std::string([title UTF8String]) : "";
+
+  // Get the app name
+  NSRunningApplication* app = [[NSWorkspace sharedWorkspace] frontmostApplication];
+  std::string appName = "";
+  if (app && app.localizedName) {
+    appName = std::string([app.localizedName UTF8String]);
+  }
+
+  return {titleStr, appName};
+}
 
 static const char* TypeToName(CGEventType t) {
   switch (t) {
@@ -64,6 +164,19 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     }
   }
 
+  // Get window title and app name based on event type
+  std::string windowTitle;
+  std::string windowAppName;
+  if (type == kCGEventKeyDown) {
+    auto windowInfo = GetActiveWindowInfo();
+    windowTitle = windowInfo.first;
+    windowAppName = windowInfo.second;
+  } else {
+    auto windowInfo = GetWindowInfoFromPoint(p);
+    windowTitle = windowInfo.first;
+    windowAppName = windowInfo.second;
+  }
+
   tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", TypeToName(type));
@@ -79,6 +192,8 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     obj.Set("altKey", altKey);
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
+    obj.Set("windowTitle", windowTitle);
+    obj.Set("windowAppName", windowAppName);
     cb.Call({ obj });
   });
 
@@ -128,7 +243,10 @@ public:
                              Callback,
                              nullptr);
 
-      if (!tap) { running.store(false); return; }
+      if (!tap) {
+        running.store(false);
+        return;
+      }
 
       runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
       CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);

@@ -12,6 +12,112 @@ static HHOOK g_keyboardHook = nullptr;
 static std::thread g_loopThread;
 static DWORD g_loopThreadId = 0;
 
+// Helper function to get window title and app name from a point
+static std::pair<std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
+  HWND hwnd = WindowFromPoint(pt);
+  if (!hwnd) return {"", ""};
+
+  // Get the window text
+  WCHAR title[256] = {0};
+  int len = GetWindowTextW(hwnd, title, 255);
+  std::string titleStr = "";
+  if (len > 0) {
+    // Convert to UTF-8
+    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, title, len, NULL, 0, NULL, NULL);
+    if (sizeNeeded > 0) {
+      titleStr.resize(sizeNeeded);
+      WideCharToMultiByte(CP_UTF8, 0, title, len, &titleStr[0], sizeNeeded, NULL, NULL);
+    }
+  }
+
+  // Get the app name
+  std::string appName = "";
+  DWORD processId = 0;
+  GetWindowThreadProcessId(hwnd, &processId);
+  if (processId > 0) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (hProcess) {
+      WCHAR exePath[MAX_PATH] = {0};
+      DWORD pathLen = MAX_PATH;
+      if (QueryFullProcessImageNameW(hProcess, 0, exePath, &pathLen)) {
+        // Extract just the filename from the full path
+        WCHAR* fileName = wcsrchr(exePath, L'\\');
+        if (fileName) {
+          fileName++; // Skip the backslash
+          // Remove .exe extension if present
+          WCHAR* ext = wcsrchr(fileName, L'.');
+          if (ext && _wcsicmp(ext, L".exe") == 0) {
+            *ext = L'\0';
+          }
+
+          // Convert to UTF-8
+          int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, fileName, -1, NULL, 0, NULL, NULL);
+          if (sizeNeeded > 0) {
+            appName.resize(sizeNeeded - 1); // -1 to exclude null terminator
+            WideCharToMultiByte(CP_UTF8, 0, fileName, -1, &appName[0], sizeNeeded, NULL, NULL);
+          }
+        }
+      }
+      CloseHandle(hProcess);
+    }
+  }
+
+  return {titleStr, appName};
+}
+
+// Helper function to get window title and app name from active window
+static std::pair<std::string, std::string> GetActiveWindowInfo() {
+  HWND hwnd = GetForegroundWindow();
+  if (!hwnd) return {"", ""};
+
+  // Get the window text
+  WCHAR title[256] = {0};
+  int len = GetWindowTextW(hwnd, title, 255);
+  std::string titleStr = "";
+  if (len > 0) {
+    // Convert to UTF-8
+    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, title, len, NULL, 0, NULL, NULL);
+    if (sizeNeeded > 0) {
+      titleStr.resize(sizeNeeded);
+      WideCharToMultiByte(CP_UTF8, 0, title, len, &titleStr[0], sizeNeeded, NULL, NULL);
+    }
+  }
+
+  // Get the app name
+  std::string appName = "";
+  DWORD processId = 0;
+  GetWindowThreadProcessId(hwnd, &processId);
+  if (processId > 0) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (hProcess) {
+      WCHAR exePath[MAX_PATH] = {0};
+      DWORD pathLen = MAX_PATH;
+      if (QueryFullProcessImageNameW(hProcess, 0, exePath, &pathLen)) {
+        // Extract just the filename from the full path
+        WCHAR* fileName = wcsrchr(exePath, L'\\');
+        if (fileName) {
+          fileName++; // Skip the backslash
+          // Remove .exe extension if present
+          WCHAR* ext = wcsrchr(fileName, L'.');
+          if (ext && _wcsicmp(ext, L".exe") == 0) {
+            *ext = L'\0';
+          }
+
+          // Convert to UTF-8
+          int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, fileName, -1, NULL, 0, NULL, NULL);
+          if (sizeNeeded > 0) {
+            appName.resize(sizeNeeded - 1); // -1 to exclude null terminator
+            WideCharToMultiByte(CP_UTF8, 0, fileName, -1, &appName[0], sizeNeeded, NULL, NULL);
+          }
+        }
+      }
+      CloseHandle(hProcess);
+    }
+  }
+
+  return {titleStr, appName};
+}
+
 static const char* MouseTypeToName(WPARAM wParam) {
   switch (wParam) {
     case WM_LBUTTONDOWN:
@@ -81,6 +187,11 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     else if (GetKeyState(VK_MBUTTON) & 0x8000) button = 2;
   }
 
+  // Get window title and app name from the point
+  auto windowInfo = GetWindowInfoFromPoint(p);
+  std::string windowTitle = windowInfo.first;
+  std::string windowAppName = windowInfo.second;
+
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", type);
@@ -91,6 +202,8 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     obj.Set("altKey", altKey);
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
+    obj.Set("windowTitle", windowTitle);
+    obj.Set("windowAppName", windowAppName);
     cb.Call({ obj });
   });
 
@@ -127,6 +240,11 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   bool shiftKey = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   bool ctrlKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
+  // Get window title and app name from the active window
+  auto windowInfo = GetActiveWindowInfo();
+  std::string windowTitle = windowInfo.first;
+  std::string windowAppName = windowInfo.second;
+
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", "keypress");
@@ -136,6 +254,8 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     obj.Set("altKey", altKey);
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
+    obj.Set("windowTitle", windowTitle);
+    obj.Set("windowAppName", windowAppName);
     cb.Call({ obj });
   });
 

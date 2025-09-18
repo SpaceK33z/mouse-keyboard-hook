@@ -1,33 +1,21 @@
-## mouse-hook
+## mouse-keyboard-hook
 
-A Node.js native addon to track mouse and keyboard events on macOS and Windows.
+A Node.js native addon to track mouse and keyboard events on macOS and Windows. Linux not supported!
 
-Linux not supported!
+This was developed as an alternative to the various iohook packages that there are. This package is way simpler and does not have any external dependencies.
 
-### Prerequisites (macOS)
-This project compiles a native module during install/build using `node-gyp`. Make sure the toolchain is ready:
+Features;
 
-- **Node.js**: v20+
-- **Xcode Command Line Tools** (provides `clang`, `make`)
-- **Python 3** (required by `node-gyp`)
-- **node-gyp** installed globally
-
-Set up with:
-
-```bash
-# 1) Install Xcode Command Line Tools
-xcode-select --install
-
-# 2) Ensure Python 3 is available and set npm to use it
-python3 --version
-npm config set python "$(which python3)"
-
-# 3) Install node-gyp globally
-npm i -g node-gyp
-
-# 4) (Sometimes required) Accept Xcode license
-sudo xcodebuild -license accept
-```
+* Track mousedown / mouseup / mousedrag
+  * x,y coordinates
+  * button that was pressed (1 = left, 2 = right, 3 = middle)
+  * alt / shift / meta key pressed during the event
+  * window title where the event occurred
+* Track keypress
+  * `keychar`, e.g. 9 = Tab, 13 = Enter
+  * `key`, e.g. "A"
+  * alt / shift / meta key pressed during the event
+  * window title of the active window
 
 ### Install
 
@@ -36,6 +24,18 @@ pnpm install @spacek33z/mouse-hook
 # or
 npm install @spacek33z/mouse-hook
 ```
+
+### Prerequisites
+
+This project compiles a native module during install/build using `node-gyp`. Make sure the toolchain is ready:
+
+- **Node.js**: v20+
+- **Python 3** (required by `node-gyp`)
+- **node-gyp** installed globally (`npm i -g node-gyp`)
+- For macOS:
+  - **Xcode Command Line Tools** (`xcode-select --install`)
+- For Windows:
+ - **Visual Studio Build Tools** (C++ build tools)
 
 ### Usage
 
@@ -47,6 +47,12 @@ mouseHook.start();
 
 mouseHook.on('mousedown', (evt) => {
   console.log('mousedown:', evt);
+  console.log('Window:', evt.windowTitle);
+});
+
+mouseHook.on('keypress', (evt) => {
+  console.log('keypress:', evt);
+  console.log('Window:', evt.windowTitle);
 });
 
 // At some point later:
@@ -55,7 +61,7 @@ mouseHook.stop();
 
 ### Development
 
-If you want to work on this package, first do:
+If you want to work on this package, first run:
 
 ```bash
 pnpm install
@@ -68,30 +74,8 @@ Then you can launch this test script to see if everything works:
 node test.js
 ```
 
-### Prerequisites (Windows)
-This project compiles a native module during install/build using `node-gyp` and MSVC.
-
-- **Node.js**: v20+ recommended
-- **Windows 10/11 SDK** (installed by VS Build Tools)
-- **Visual Studio Build Tools** (C++ build tools)
-- **Python 3** (required by `node-gyp`)
-- **node-gyp** installed globally
-
-Set up with PowerShell:
-
-```powershell
-# 1) Install VS Build Tools (C++), Windows 10/11 SDK
-#    https://visualstudio.microsoft.com/visual-cpp-build-tools/
-
-# 2) Ensure Python 3 is available and set npm to use it
-python --version
-npm config set python "$(py -3 -c \"import sys,sys;print(sys.executable)\")"
-
-# 3) Install node-gyp globally
-npm i -g node-gyp
-```
-
 ### Troubleshooting `node-gyp`
+
 - **No Python found**: Install Python 3 and run `npm config set python "$(which python3)"`
 - **No Xcode or CLT**: Run `xcode-select --install`
 - **`binding.gyp` not found**: Run commands from the project root (where `binding.gyp` is)
