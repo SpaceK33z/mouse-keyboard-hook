@@ -184,24 +184,6 @@ static const char* MouseTypeToName(WPARAM wParam) {
   }
 }
 
-// Convert a physical pixel POINT to device-independent pixels (DIP, 96 DPI)
-static inline POINT ConvertPixelsToDip(POINT physicalPoint) {
-  POINT dipPoint = physicalPoint;
-  HMONITOR monitor = MonitorFromPoint(physicalPoint, MONITOR_DEFAULTTONEAREST);
-  UINT dpiX = 96, dpiY = 96;
-  if (monitor) {
-    if (GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != S_OK) {
-      dpiX = dpiY = 96;
-    }
-  }
-  // Avoid division by zero and unnecessary work when already 96 DPI
-  if (dpiX == 0) dpiX = 96;
-  if (dpiY == 0) dpiY = 96;
-  if (dpiX != 96) dipPoint.x = MulDiv(physicalPoint.x, 96, dpiX);
-  if (dpiY != 96) dipPoint.y = MulDiv(physicalPoint.y, 96, dpiY);
-  return dipPoint;
-}
-
 static int GetButtonFromParams(WPARAM wParam) {
   switch (wParam) {
     case WM_LBUTTONDOWN:
@@ -227,9 +209,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
   }
 
   PMSLLHOOKSTRUCT ms = reinterpret_cast<PMSLLHOOKSTRUCT>(lParam);
-  POINT p = ms->pt;
-  // Normalize mouse coordinates to DIP so they match keypress coordinates in DPI-unaware contexts
-  p = ConvertPixelsToDip(p);
+  POINT p = ms->pt; // use physical pixel coordinates directly
 
   // modifier keys
   bool metaKey = (GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000);
@@ -336,10 +316,19 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   bool shiftKey = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   bool ctrlKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-  // Get current mouse position in physical pixels to avoid DPI virtualization
+  // Get current mouse position in physical pixels; fallback converts logical to physical using per-monitor DPI
   POINT mousePos;
   if (!GetPhysicalCursorPos(&mousePos)) {
     GetCursorPos(&mousePos);
+    HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
+    UINT dpiX = 96, dpiY = 96;
+    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != S_OK) {
+      dpiX = dpiY = 96;
+    }
+    if (dpiX == 0) dpiX = 96;
+    if (dpiY == 0) dpiY = 96;
+    mousePos.x = MulDiv(mousePos.x, dpiX, 96);
+    mousePos.y = MulDiv(mousePos.y, dpiY, 96);
   }
 
   // Get window title and app name from the active window
