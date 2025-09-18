@@ -3,7 +3,7 @@ export type MouseEvent = {
   x: number;
   y: number;
   button: number; // 0 = left, 1 = right, 2 = middle mouse
-  clicks: number; // 1 = single, 2 = double, 3 = triple
+  clicks: number; // 1 = single click, 2 = double, etc
   metaKey: boolean;
   altKey: boolean;
   shiftKey: boolean;

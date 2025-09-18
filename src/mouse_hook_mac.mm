@@ -320,6 +320,21 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     }
   }
 
+  // Get current mouse position for keypress events
+  CGPoint mousePos = p;
+  if (type == kCGEventKeyDown) {
+    // For keypress events, get the current mouse position
+    // Use CGEventCreate to get current mouse position
+    CGEventRef mouseEvent = CGEventCreate(NULL);
+    if (mouseEvent) {
+      mousePos = CGEventGetLocation(mouseEvent);
+      CFRelease(mouseEvent);
+    } else {
+      // Fallback: use the event location if we can't get current position
+      mousePos = p;
+    }
+  }
+
   // Determine click count from event (macOS provides this)
   int64_t clicks = (int64_t)CGEventGetIntegerValueField(event, kCGMouseEventClickState);
 
@@ -329,6 +344,8 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     if (type == kCGEventKeyDown) {
       obj.Set("keychar", keychar);
       obj.Set("key", key);
+      obj.Set("x", mousePos.x);
+      obj.Set("y", mousePos.y);
     } else {
       obj.Set("x", p.x);
       obj.Set("y", p.y);
