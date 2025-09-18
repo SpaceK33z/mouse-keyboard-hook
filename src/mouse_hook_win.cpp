@@ -315,16 +315,10 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   bool shiftKey = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   bool ctrlKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-  // Get current mouse position (use same coordinate system as mouse events)
+  // Get current mouse position - GetCursorPos returns virtual screen coordinates
+  // which matches the coordinate system used by MSLLHOOKSTRUCT in mouse events
   POINT mousePos;
   GetCursorPos(&mousePos);
-
-  // Convert to virtual screen coordinates to match MSLLHOOKSTRUCT coordinates
-  // This handles DPI scaling differences between GetCursorPos and low-level hooks
-  int dpiX = GetDpiForSystem();
-  int dpiY = GetDpiForSystem();
-  mousePos.x = MulDiv(mousePos.x, 96, dpiX);
-  mousePos.y = MulDiv(mousePos.y, 96, dpiY);
 
   // Get window title and app name from the active window
   auto windowInfo = GetActiveWindowInfo();
