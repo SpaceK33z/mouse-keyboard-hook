@@ -349,25 +349,42 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
       mousePos.y = MulDiv(mousePos.y, dpiY, 96);
     }
   } else {
-    // GetPhysicalCursorPos worked, but we need to scale to match MSLLHOOKSTRUCT coords
-    // Get system DPI scaling factor
+    // GetPhysicalCursorPos gives us coordinates that don't match MSLLHOOKSTRUCT
+    // Since DPI APIs return 96 (app is DPI-unaware), we need to get real scaling factor
+    // Try to get the real DPI by making the thread DPI-aware temporarily
     HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
-    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
-      if (dpiX == 0) dpiX = 96;
-      if (dpiY == 0) dpiY = 96;
-      // Scale from GetPhysicalCursorPos coords to MSLLHOOKSTRUCT coords
-      mousePos.x = MulDiv(mousePos.x, dpiX, 96);
-      mousePos.y = MulDiv(mousePos.y, dpiY, 96);
-    } else {
-      // If DPI detection fails, use system DPI
-      HDC hdc = GetDC(NULL);
-      if (hdc) {
-        dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
-        dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
-        ReleaseDC(NULL, hdc);
-        mousePos.x = MulDiv(mousePos.x, dpiX, 96);
-        mousePos.y = MulDiv(mousePos.y, dpiY, 96);
+
+    // Try to get real DPI using GetDpiForWindow of desktop
+    HWND desktop = GetDesktopWindow();
+    UINT realDpi = 96;
+
+    // Windows 10 1607+ method
+    typedef UINT (WINAPI *GetDpiForWindowProc)(HWND);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+      GetDpiForWindowProc getDpiForWindow = (GetDpiForWindowProc)GetProcAddress(user32, "GetDpiForWindow");
+      if (getDpiForWindow) {
+        realDpi = getDpiForWindow(desktop);
+        dpiX = dpiY = realDpi;
       }
+    }
+
+    // If that failed, calculate from screen metrics
+    if (realDpi == 96) {
+      int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+      int physicalWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+      if (physicalWidth > 0 && screenWidth > 0) {
+        // This is a rough approximation
+        float scale = (float)physicalWidth / screenWidth;
+        realDpi = (UINT)(96.0f * scale);
+        dpiX = dpiY = realDpi;
+      }
+    }
+
+    // Apply scaling to match mouse hook coordinates
+    if (realDpi != 96) {
+      mousePos.x = MulDiv(mousePos.x, realDpi, 96);
+      mousePos.y = MulDiv(mousePos.y, realDpi, 96);
     }
   }
 
