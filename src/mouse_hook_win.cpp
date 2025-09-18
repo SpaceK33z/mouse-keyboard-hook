@@ -267,6 +267,13 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
   std::string windowTitle = std::get<0>(windowInfo);
   std::string windowAppName = std::get<1>(windowInfo);
 
+  // Get DPI info for debugging
+  HMONITOR hMonitor = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+  UINT dpiX = 96, dpiY = 96;
+  if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != S_OK) {
+    dpiX = dpiY = 96;
+  }
+
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
     obj.Set("type", type);
@@ -280,6 +287,8 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
     obj.Set("windowAppName", windowAppName);
+    obj.Set("dpiX", static_cast<double>(dpiX));
+    obj.Set("dpiY", static_cast<double>(dpiY));
     cb.Call({ obj });
   });
 
@@ -318,10 +327,11 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 
   // Get current mouse position in physical pixels; fallback converts logical to physical using per-monitor DPI
   POINT mousePos;
-  if (!GetPhysicalCursorPos(&mousePos)) {
+  bool usedPhysicalCursor = GetPhysicalCursorPos(&mousePos);
+  UINT dpiX = 96, dpiY = 96;
+  if (!usedPhysicalCursor) {
     GetCursorPos(&mousePos);
     HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
-    UINT dpiX = 96, dpiY = 96;
     if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != S_OK) {
       dpiX = dpiY = 96;
     }
@@ -329,6 +339,12 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     if (dpiY == 0) dpiY = 96;
     mousePos.x = MulDiv(mousePos.x, dpiX, 96);
     mousePos.y = MulDiv(mousePos.y, dpiY, 96);
+  } else {
+    // Even if we got physical cursor pos, get DPI for debugging
+    HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
+    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != S_OK) {
+      dpiX = dpiY = 96;
+    }
   }
 
   // Get window title and app name from the active window
@@ -349,6 +365,9 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
     obj.Set("windowAppName", windowAppName);
+    obj.Set("dpiX", static_cast<double>(dpiX));
+    obj.Set("dpiY", static_cast<double>(dpiY));
+    obj.Set("usedPhysicalCursor", usedPhysicalCursor);
     cb.Call({ obj });
   });
 
