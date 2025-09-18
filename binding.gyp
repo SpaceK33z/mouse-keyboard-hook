@@ -19,10 +19,10 @@
           "msvs_settings": {
             "VCCLCompilerTool": { "ExceptionHandling": 1 },
             "VCLinkerTool": {
-              "AdditionalDependencies": ["User32.lib", "version.lib"]
+              "AdditionalDependencies": ["User32.lib", "version.lib", "Shcore.lib"]
             }
           },
-          "libraries": ["User32.lib", "version.lib"]
+          "libraries": ["User32.lib", "version.lib", "Shcore.lib"]
         }]
       ]
     }
