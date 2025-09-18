@@ -90,43 +90,78 @@ std::string getProcessName(const HANDLE &hProcess) {
   return name;
 }
 
-// Helper function to get window title and app name from a point
-static std::pair<std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
-  HWND hwnd = WindowFromPoint(pt);
-  if (!hwnd) return {"", ""};
+// Helper function to extract URL from browser window title
+static std::string extractUrlFromTitle(const std::string& title, const std::string& appName) {
+  // Check if this is a browser application
+  std::string lowerAppName = appName;
+  std::transform(lowerAppName.begin(), lowerAppName.end(), lowerAppName.begin(), ::tolower);
 
-  // Get the window text
-  WCHAR title[256] = {0};
-  int len = GetWindowTextW(hwnd, title, 255);
-  std::string titleStr = "";
-  if (len > 0) {
-    // Convert to UTF-8
-    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, title, len, NULL, 0, NULL, NULL);
-    if (sizeNeeded > 0) {
-      titleStr.resize(sizeNeeded);
-      WideCharToMultiByte(CP_UTF8, 0, title, len, &titleStr[0], sizeNeeded, NULL, NULL);
+  bool isBrowser = (lowerAppName.find("microsoft edge") != std::string::npos ||
+                   lowerAppName.find("chrome") != std::string::npos ||
+                   lowerAppName.find("firefox") != std::string::npos ||
+                   lowerAppName.find("safari") != std::string::npos ||
+                   lowerAppName.find("opera") != std::string::npos);
+
+  if (!isBrowser) return "";
+
+  // Common patterns for URL extraction from window titles
+  // Edge/Chrome: "Page Title - Microsoft Edge" or "Page Title | Microsoft Edge"
+  // Firefox: "Page Title - Mozilla Firefox"
+  // Safari: "Page Title - Safari"
+
+  // Look for common separators and extract what might be a URL
+  std::string url = "";
+
+  // Check if title contains a URL pattern (http:// or https://)
+  size_t httpPos = title.find("http://");
+  size_t httpsPos = title.find("https://");
+
+  if (httpPos != std::string::npos) {
+    size_t start = httpPos;
+    size_t end = title.find(" ", start);
+    if (end == std::string::npos) end = title.length();
+    url = title.substr(start, end - start);
+  } else if (httpsPos != std::string::npos) {
+    size_t start = httpsPos;
+    size_t end = title.find(" ", start);
+    if (end == std::string::npos) end = title.length();
+    url = title.substr(start, end - start);
+  } else {
+    // Try to extract from common browser title patterns
+    // Look for patterns like " - " or " | " that might separate title from browser name
+    size_t dashPos = title.find(" - ");
+    size_t pipePos = title.find(" | ");
+
+    if (dashPos != std::string::npos && dashPos > 0) {
+      // Extract the part before the separator
+      std::string potentialUrl = title.substr(0, dashPos);
+      // Check if it looks like a URL (contains dots and common URL characters)
+      if (potentialUrl.find(".") != std::string::npos &&
+          (potentialUrl.find("www.") != std::string::npos ||
+           potentialUrl.find(".com") != std::string::npos ||
+           potentialUrl.find(".org") != std::string::npos ||
+           potentialUrl.find(".net") != std::string::npos)) {
+        url = potentialUrl;
+      }
+    } else if (pipePos != std::string::npos && pipePos > 0) {
+      std::string potentialUrl = title.substr(0, pipePos);
+      if (potentialUrl.find(".") != std::string::npos &&
+          (potentialUrl.find("www.") != std::string::npos ||
+           potentialUrl.find(".com") != std::string::npos ||
+           potentialUrl.find(".org") != std::string::npos ||
+           potentialUrl.find(".net") != std::string::npos)) {
+        url = potentialUrl;
+      }
     }
   }
 
-  // Get the app name using the better approach
-  std::string appName = "";
-  DWORD processId = 0;
-  GetWindowThreadProcessId(hwnd, &processId);
-  if (processId > 0) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-    if (hProcess) {
-      appName = getProcessName(hProcess);
-      CloseHandle(hProcess);
-    }
-  }
-
-  return {titleStr, appName};
+  return url;
 }
 
-// Helper function to get window title and app name from active window
-static std::pair<std::string, std::string> GetActiveWindowInfo() {
-  HWND hwnd = GetForegroundWindow();
-  if (!hwnd) return {"", ""};
+// Helper function to get window title, app name, and URL from a point
+static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
+  HWND hwnd = WindowFromPoint(pt);
+  if (!hwnd) return {"", "", ""};
 
   // Get the window text
   WCHAR title[256] = {0};
@@ -153,7 +188,46 @@ static std::pair<std::string, std::string> GetActiveWindowInfo() {
     }
   }
 
-  return {titleStr, appName};
+  // Extract URL from title if it's a browser
+  std::string windowUrl = extractUrlFromTitle(titleStr, appName);
+
+  return {titleStr, appName, windowUrl};
+}
+
+// Helper function to get window title, app name, and URL from active window
+static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
+  HWND hwnd = GetForegroundWindow();
+  if (!hwnd) return {"", "", ""};
+
+  // Get the window text
+  WCHAR title[256] = {0};
+  int len = GetWindowTextW(hwnd, title, 255);
+  std::string titleStr = "";
+  if (len > 0) {
+    // Convert to UTF-8
+    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, title, len, NULL, 0, NULL, NULL);
+    if (sizeNeeded > 0) {
+      titleStr.resize(sizeNeeded);
+      WideCharToMultiByte(CP_UTF8, 0, title, len, &titleStr[0], sizeNeeded, NULL, NULL);
+    }
+  }
+
+  // Get the app name using the better approach
+  std::string appName = "";
+  DWORD processId = 0;
+  GetWindowThreadProcessId(hwnd, &processId);
+  if (processId > 0) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (hProcess) {
+      appName = getProcessName(hProcess);
+      CloseHandle(hProcess);
+    }
+  }
+
+  // Extract URL from title if it's a browser
+  std::string windowUrl = extractUrlFromTitle(titleStr, appName);
+
+  return {titleStr, appName, windowUrl};
 }
 
 static const char* MouseTypeToName(WPARAM wParam) {
@@ -225,10 +299,11 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     else if (GetKeyState(VK_MBUTTON) & 0x8000) button = 2;
   }
 
-  // Get window title and app name from the point
+  // Get window title, app name, and URL from the point
   auto windowInfo = GetWindowInfoFromPoint(p);
-  std::string windowTitle = windowInfo.first;
-  std::string windowAppName = windowInfo.second;
+  std::string windowTitle = std::get<0>(windowInfo);
+  std::string windowAppName = std::get<1>(windowInfo);
+  std::string windowUrl = std::get<2>(windowInfo);
 
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
@@ -242,6 +317,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
     obj.Set("windowAppName", windowAppName);
+    obj.Set("windowUrl", windowUrl);
     cb.Call({ obj });
   });
 
@@ -278,10 +354,11 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   bool shiftKey = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   bool ctrlKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-  // Get window title and app name from the active window
+  // Get window title, app name, and URL from the active window
   auto windowInfo = GetActiveWindowInfo();
-  std::string windowTitle = windowInfo.first;
-  std::string windowAppName = windowInfo.second;
+  std::string windowTitle = std::get<0>(windowInfo);
+  std::string windowAppName = std::get<1>(windowInfo);
+  std::string windowUrl = std::get<2>(windowInfo);
 
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
@@ -294,6 +371,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
     obj.Set("windowAppName", windowAppName);
+    obj.Set("windowUrl", windowUrl);
     cb.Call({ obj });
   });
 
