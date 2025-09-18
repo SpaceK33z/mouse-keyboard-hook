@@ -325,25 +325,41 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   bool shiftKey = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
   bool ctrlKey = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-  // Get current mouse position in physical pixels; fallback converts logical to physical using per-monitor DPI
+  // Get current mouse position and convert to match mouse event coordinates
   POINT mousePos;
   bool usedPhysicalCursor = GetPhysicalCursorPos(&mousePos);
   UINT dpiX = 96, dpiY = 96;
+
   if (!usedPhysicalCursor) {
+    // Fallback: GetCursorPos gives logical coords, convert to physical
     GetCursorPos(&mousePos);
     HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
-    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != S_OK) {
-      dpiX = dpiY = 96;
+    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
+      if (dpiX == 0) dpiX = 96;
+      if (dpiY == 0) dpiY = 96;
+      mousePos.x = MulDiv(mousePos.x, dpiX, 96);
+      mousePos.y = MulDiv(mousePos.y, dpiY, 96);
     }
-    if (dpiX == 0) dpiX = 96;
-    if (dpiY == 0) dpiY = 96;
-    mousePos.x = MulDiv(mousePos.x, dpiX, 96);
-    mousePos.y = MulDiv(mousePos.y, dpiY, 96);
   } else {
-    // Even if we got physical cursor pos, get DPI for debugging
+    // GetPhysicalCursorPos worked, but we need to scale to match MSLLHOOKSTRUCT coords
+    // Get system DPI scaling factor
     HMONITOR hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
-    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) != S_OK) {
-      dpiX = dpiY = 96;
+    if (hMonitor && GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY) == S_OK) {
+      if (dpiX == 0) dpiX = 96;
+      if (dpiY == 0) dpiY = 96;
+      // Scale from GetPhysicalCursorPos coords to MSLLHOOKSTRUCT coords
+      mousePos.x = MulDiv(mousePos.x, dpiX, 96);
+      mousePos.y = MulDiv(mousePos.y, dpiY, 96);
+    } else {
+      // If DPI detection fails, use system DPI
+      HDC hdc = GetDC(NULL);
+      if (hdc) {
+        dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
+        dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(NULL, hdc);
+        mousePos.x = MulDiv(mousePos.x, dpiX, 96);
+        mousePos.y = MulDiv(mousePos.y, dpiY, 96);
+      }
     }
   }
 
