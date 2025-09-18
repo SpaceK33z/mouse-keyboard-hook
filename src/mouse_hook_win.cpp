@@ -95,8 +95,8 @@ static std::string GetUrlFromHwnd(HWND hwnd) {
 
   // Search the entire subtree for candidate edits
   IUIAutomationElementArray* edits = nullptr;
-  if (editAndNotPwd) {
-    g_uia->FindAll(TreeScope_Subtree, editAndNotPwd, &edits);
+  if (editAndNotPwd && root) {
+    root->FindAll(TreeScope_Subtree, editAndNotPwd, &edits);
   }
 
   if (edits) {
