@@ -19,6 +19,8 @@ Features;
   - window title of the active window
   - x,y coordinates (for cursor position)
 
+This package does not take care of requesting permissions!
+
 ### Install
 
 ```bash
@@ -59,6 +61,12 @@ mouseHook.on("keypress", (evt) => {
 
 // At some point later:
 mouseHook.stop();
+```
+
+For whatever reason, you might want to treat certain windows as "transparent"; meaning that it pierces through them to get the window behind them.
+
+```
+const mouseHook = new MouseHook({ transparentWindowOwnerNames: ["Finder", "Terminal"] })
 ```
 
 ### How to use in Electron

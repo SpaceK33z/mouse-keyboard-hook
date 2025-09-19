@@ -9,7 +9,7 @@ export type MouseEvent = {
   shiftKey: boolean;
   ctrlKey: boolean;
   windowTitle: string;
-  windowAppName: string;
+  windowOwnerName: string;
   windowUrl?: string; // only set for macOS
 };
 
@@ -24,7 +24,7 @@ export type KeypressEvent = {
   shiftKey: boolean;
   ctrlKey: boolean;
   windowTitle: string;
-  windowAppName: string;
+  windowOwnerName: string;
   windowUrl?: string; // only set for macOS
 };
 

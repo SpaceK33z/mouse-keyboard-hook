@@ -16,6 +16,17 @@ static HHOOK g_keyboardHook = nullptr;
 static std::thread g_loopThread;
 static DWORD g_loopThreadId = 0;
 
+// Configurable list of window owner names to treat as transparent - allows piercing through to get the window behind
+static std::vector<std::string> g_transparentWindowOwnerNames; // e.g., "Tango App"
+
+static bool IsTransparentOwnerName(const std::string& ownerName) {
+  if (ownerName.empty()) return false;
+  for (const auto& n : g_transparentWindowOwnerNames) {
+    if (!n.empty() && ownerName == n) return true;
+  }
+  return false;
+}
+
 // Initialize DPI awareness once
 static bool g_dpiInitialized = false;
 static void InitializeDpiAwareness() {
@@ -127,32 +138,50 @@ static std::tuple<std::string, std::string> GetWindowInfoFromPoint(POINT pt) {
   HWND hwnd = WindowFromPoint(pt);
   if (!hwnd) return {"", ""};
 
-  // Get the window text
-  WCHAR title[256] = {0};
-  int len = GetWindowTextW(hwnd, title, 255);
-  std::string titleStr = "";
-  if (len > 0) {
-    // Convert to UTF-8
-    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, title, len, NULL, 0, NULL, NULL);
-    if (sizeNeeded > 0) {
-      titleStr.resize(sizeNeeded);
-      WideCharToMultiByte(CP_UTF8, 0, title, len, &titleStr[0], sizeNeeded, NULL, NULL);
+  // Start with the topmost window and work our way down the Z-order
+  HWND currentHwnd = hwnd;
+  while (currentHwnd) {
+    // Get the window text
+    WCHAR title[256] = {0};
+    int len = GetWindowTextW(currentHwnd, title, 255);
+    std::string titleStr = "";
+    if (len > 0) {
+      // Convert to UTF-8
+      int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, title, len, NULL, 0, NULL, NULL);
+      if (sizeNeeded > 0) {
+        titleStr.resize(sizeNeeded);
+        WideCharToMultiByte(CP_UTF8, 0, title, len, &titleStr[0], sizeNeeded, NULL, NULL);
+      }
     }
+
+    // Get the app name using the better approach
+    std::string appName = "";
+    DWORD processId = 0;
+    GetWindowThreadProcessId(currentHwnd, &processId);
+    if (processId > 0) {
+      HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+      if (hProcess) {
+        appName = getProcessName(hProcess);
+        CloseHandle(hProcess);
+      }
+    }
+
+    // If this window is not skipped, return it
+    if (!IsTransparentOwnerName(appName)) {
+      return {titleStr, appName};
+    }
+
+    // If this window is skipped, find the next window in Z-order
+    HWND nextHwnd = GetWindow(currentHwnd, GW_HWNDNEXT);
+    if (!nextHwnd) {
+      // No more windows behind this one
+      break;
+    }
+    currentHwnd = nextHwnd;
   }
 
-  // Get the app name using the better approach
-  std::string appName = "";
-  DWORD processId = 0;
-  GetWindowThreadProcessId(hwnd, &processId);
-  if (processId > 0) {
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-    if (hProcess) {
-      appName = getProcessName(hProcess);
-      CloseHandle(hProcess);
-    }
-  }
-
-  return {titleStr, appName};
+  // If we get here, all windows at this point were skipped
+  return {"", ""};
 }
 
 // Helper function to get window title and app name from active window
@@ -185,7 +214,14 @@ static std::tuple<std::string, std::string> GetActiveWindowInfo() {
     }
   }
 
-  return {titleStr, appName};
+  // If this window is not skipped, return it
+  if (!IsTransparentOwnerName(appName)) {
+    return {titleStr, appName};
+  }
+
+  // If the active window is skipped, we can't easily find the "next" active window
+  // so we'll return empty strings
+  return {"", ""};
 }
 
 static const char* MouseTypeToName(WPARAM wParam) {
@@ -288,7 +324,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
   // Get window title and app name from the point
   auto windowInfo = GetWindowInfoFromPoint(p);
   std::string windowTitle = std::get<0>(windowInfo);
-  std::string windowAppName = std::get<1>(windowInfo);
+  std::string windowOwnerName = std::get<1>(windowInfo);
 
   // Get DPI info for debugging
   HMONITOR hMonitor = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
@@ -309,7 +345,7 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
-    obj.Set("windowAppName", windowAppName);
+    obj.Set("windowOwnerName", windowOwnerName);
     obj.Set("dpiX", static_cast<double>(dpiX));
     obj.Set("dpiY", static_cast<double>(dpiY));
     cb.Call({ obj });
@@ -373,7 +409,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
   // Get window title and app name from the active window
   auto windowInfo = GetActiveWindowInfo();
   std::string windowTitle = std::get<0>(windowInfo);
-  std::string windowAppName = std::get<1>(windowInfo);
+  std::string windowOwnerName = std::get<1>(windowInfo);
 
   g_tsfn.BlockingCall([=](Napi::Env env, Napi::Function cb) {
     Napi::Object obj = Napi::Object::New(env);
@@ -387,7 +423,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     obj.Set("shiftKey", shiftKey);
     obj.Set("ctrlKey", ctrlKey);
     obj.Set("windowTitle", windowTitle);
-    obj.Set("windowAppName", windowAppName);
+    obj.Set("windowOwnerName", windowOwnerName);
     cb.Call({ obj });
   });
 
@@ -416,6 +452,21 @@ public:
 
   Napi::Value Start(const Napi::CallbackInfo& info) {
     if (g_running.exchange(true)) return info.Env().Undefined();
+
+    // Configure transparent window owner names if provided
+    if (info.Length() >= 1 && info[0].IsObject()) {
+      Napi::Object opts = info[0].As<Napi::Object>();
+      if (opts.Has("transparentWindowOwnerNames") && opts.Get("transparentWindowOwnerNames").IsArray()) {
+        g_transparentWindowOwnerNames.clear();
+        Napi::Array arr = opts.Get("transparentWindowOwnerNames").As<Napi::Array>();
+        for (uint32_t i = 0; i < arr.Length(); i++) {
+          Napi::Value v = arr.Get(i);
+          if (v.IsString()) {
+            g_transparentWindowOwnerNames.push_back(v.As<Napi::String>().Utf8Value());
+          }
+        }
+      }
+    }
 
     // Initialize DPI awareness before starting hooks
     InitializeDpiAwareness();

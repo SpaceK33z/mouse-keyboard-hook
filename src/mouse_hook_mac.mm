@@ -5,11 +5,25 @@
 #include <napi.h>
 #include <Cocoa/Cocoa.h>
 #include <Carbon/Carbon.h>
+#include <vector>
+#include <algorithm>
 
 static CFMachPortRef tap = nullptr;
 static CFRunLoopSourceRef runLoopSource = nullptr;
 static std::atomic<bool> running{false};
 static Napi::ThreadSafeFunction tsfn;
+
+// Configurable list of window owner names to treat as transparent - allows piercing through to get the window behind
+static std::vector<std::string> g_transparentWindowOwnerNames; // e.g., "Tango App"
+
+static bool IsTransparentOwnerName(const std::string& ownerName) {
+  if (ownerName.empty()) return false;
+  for (const auto& n : g_transparentWindowOwnerNames) {
+    if (!n.empty() && ownerName == n) return true;
+  }
+  return false;
+}
+
 
 // Helper function to convert CFString to std::string
 static std::string CFStringToStdString(CFStringRef cfString) {
@@ -84,12 +98,12 @@ static std::string GetBrowserURL(const std::string& bundleId) {
 // Helper function to get window information from a point
 static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(CGPoint point) {
   std::string windowTitle = "";
-  std::string windowAppName = "";
+  std::string windowOwnerName = "";
   std::string windowUrl = "";
 
   // Get all windows and find the one containing the point
   CFArrayRef windowList = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-  if (!windowList) return {windowTitle, windowAppName, windowUrl};
+  if (!windowList) return {windowTitle, windowOwnerName, windowUrl};
 
   CFIndex windowCount = CFArrayGetCount(windowList);
 
@@ -142,6 +156,15 @@ static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(
       continue;
     }
 
+    // Skip configured apps by name or bundle id
+    std::string ownerNameMaybe = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
+    if (ownerNameMaybe.empty() && app.localizedName) {
+      ownerNameMaybe = std::string([app.localizedName UTF8String]);
+    }
+    if (IsTransparentOwnerName(ownerNameMaybe)) {
+      continue;
+    }
+
     // Get window title
     CFStringRef titleRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowName);
     if (titleRef) {
@@ -149,9 +172,9 @@ static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(
     }
 
     // Get app name
-    windowAppName = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
-    if (windowAppName.empty() && app.localizedName) {
-      windowAppName = std::string([app.localizedName UTF8String]);
+    windowOwnerName = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
+    if (windowOwnerName.empty() && app.localizedName) {
+      windowOwnerName = std::string([app.localizedName UTF8String]);
     }
 
     // Try to get browser URL
@@ -161,31 +184,31 @@ static std::tuple<std::string, std::string, std::string> GetWindowInfoFromPoint(
     }
 
     CFRelease(windowList);
-    return {windowTitle, windowAppName, windowUrl};
+    return {windowTitle, windowOwnerName, windowUrl};
   }
 
   CFRelease(windowList);
-  return {windowTitle, windowAppName, windowUrl};
+  return {windowTitle, windowOwnerName, windowUrl};
 }
 
 // Helper function to get window information from active window
 static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
   std::string windowTitle = "";
-  std::string windowAppName = "";
+  std::string windowOwnerName = "";
   std::string windowUrl = "";
 
   // Get frontmost application
   NSRunningApplication* frontmostApp = [[NSWorkspace sharedWorkspace] frontmostApplication];
   if (!frontmostApp) {
-    return {windowTitle, windowAppName, windowUrl};
+    return {windowTitle, windowOwnerName, windowUrl};
   }
 
   pid_t frontmostPID = [frontmostApp processIdentifier];
 
-  // Get all windows and find the frontmost app's window
+  // If the frontmost app is configured to be skipped, we'll still iterate but will continue past it
   CFArrayRef windowList = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
   if (!windowList) {
-    return {windowTitle, windowAppName, windowUrl};
+    return {windowTitle, windowOwnerName, windowUrl};
   }
 
   CFIndex windowCount = CFArrayGetCount(windowList);
@@ -239,6 +262,15 @@ static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
       continue;
     }
 
+    // Skip configured apps by name or bundle id
+    std::string ownerNameMaybe = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
+    if (ownerNameMaybe.empty() && app.localizedName) {
+      ownerNameMaybe = std::string([app.localizedName UTF8String]);
+    }
+    if (IsTransparentOwnerName(ownerNameMaybe)) {
+      continue;
+    }
+
     // Get window title
     CFStringRef titleRef = (CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowName);
     if (titleRef) {
@@ -246,9 +278,9 @@ static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
     }
 
     // Get app name
-    windowAppName = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
-    if (windowAppName.empty() && app.localizedName) {
-      windowAppName = std::string([app.localizedName UTF8String]);
+    windowOwnerName = CFStringToStdString((CFStringRef)CFDictionaryGetValue(windowDict, kCGWindowOwnerName));
+    if (windowOwnerName.empty() && app.localizedName) {
+      windowOwnerName = std::string([app.localizedName UTF8String]);
     }
 
     // Try to get browser URL
@@ -258,11 +290,11 @@ static std::tuple<std::string, std::string, std::string> GetActiveWindowInfo() {
     }
 
     CFRelease(windowList);
-    return {windowTitle, windowAppName, windowUrl};
+    return {windowTitle, windowOwnerName, windowUrl};
   }
 
   CFRelease(windowList);
-  return {windowTitle, windowAppName, windowUrl};
+  return {windowTitle, windowOwnerName, windowUrl};
 }
 
 static const char* TypeToName(CGEventType t) {
@@ -358,21 +390,28 @@ static CGEventRef Callback(CGEventTapProxy, CGEventType type, CGEventRef event, 
     obj.Set("ctrlKey", ctrlKey);
 
     // Get window information based on event type
-    std::string windowTitle, windowAppName, windowUrl;
+    std::string windowTitle, windowOwnerName, windowUrl;
     if (type == kCGEventKeyDown) {
       auto windowInfo = GetActiveWindowInfo();
       windowTitle = std::get<0>(windowInfo);
-      windowAppName = std::get<1>(windowInfo);
+      windowOwnerName = std::get<1>(windowInfo);
       windowUrl = std::get<2>(windowInfo);
+      // If active window belongs to a skipped app, fall back to window under mouse
+      if (IsTransparentOwnerName(windowOwnerName)) {
+        auto fallbackInfo = GetWindowInfoFromPoint(mousePos);
+        windowTitle = std::get<0>(fallbackInfo);
+        windowOwnerName = std::get<1>(fallbackInfo);
+        windowUrl = std::get<2>(fallbackInfo);
+      }
     } else {
       auto windowInfo = GetWindowInfoFromPoint(p);
       windowTitle = std::get<0>(windowInfo);
-      windowAppName = std::get<1>(windowInfo);
+      windowOwnerName = std::get<1>(windowInfo);
       windowUrl = std::get<2>(windowInfo);
     }
 
     obj.Set("windowTitle", windowTitle);
-    obj.Set("windowAppName", windowAppName);
+    obj.Set("windowOwnerName", windowOwnerName);
     obj.Set("windowUrl", windowUrl);
     cb.Call({ obj });
   });
@@ -393,7 +432,7 @@ public:
 
   Hook(const Napi::CallbackInfo& info) : Napi::ObjectWrap<Hook>(info) {
     Napi::Env env = info.Env();
-    if (info.Length() != 1 || !info[0].IsFunction()) {
+    if (info.Length() < 1 || !info[0].IsFunction()) {
       Napi::TypeError::New(env, "Expected callback").ThrowAsJavaScriptException();
       return;
     }
@@ -402,6 +441,21 @@ public:
 
   Napi::Value Start(const Napi::CallbackInfo& info) {
     if (running.exchange(true)) return info.Env().Undefined();
+
+    // Configure transparent window owner names if provided
+    if (info.Length() >= 1 && info[0].IsObject()) {
+      Napi::Object opts = info[0].As<Napi::Object>();
+      if (opts.Has("transparentWindowOwnerNames") && opts.Get("transparentWindowOwnerNames").IsArray()) {
+        g_transparentWindowOwnerNames.clear();
+        Napi::Array arr = opts.Get("transparentWindowOwnerNames").As<Napi::Array>();
+        for (uint32_t i = 0; i < arr.Length(); i++) {
+          Napi::Value v = arr.Get(i);
+          if (v.IsString()) {
+            g_transparentWindowOwnerNames.push_back(v.As<Napi::String>().Utf8Value());
+          }
+        }
+      }
+    }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
       CGEventMask mask =
@@ -450,6 +504,7 @@ public:
     if (tsfn) tsfn.Release();
     return info.Env().Undefined();
   }
+
 };
 
 Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
